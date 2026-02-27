@@ -62,13 +62,13 @@ local getscriptbytecode = getscriptbytecode or function(x) error("Unable to get 
 
 --// Services \\--
 local RobloxReplicatedStorage = cloneref(game:GetService("RobloxReplicatedStorage"))
+local VirtualInputManager = cloneref(Instance.new("VirtualInputManager"))
 local MarketplaceService = cloneref(game:GetService("MarketplaceService"))
 local CoreGui = cloneref(game:GetService("CoreGui"))
 local CorePackages = cloneref(game:GetService("CorePackages"))
 local HttpService = cloneref(game:GetService("HttpService"))
 local LogService = cloneref(game:GetService("LogService"))
 local Players = cloneref(game:GetService("Players"))
-local vim = cloneref(game:GetService("VirtualInputManager"))
 
 --// Compatibility Check \\--
 local WebSocketAvailable = (
@@ -1223,7 +1223,7 @@ while true do
         if useKeyPress then
             local success = pcall(function()
                 for i = 1, #text do
-                    vim:SendTextInput(text:sub(i, i), nil, game)
+                    VirtualInputManager:SendTextInput(text:sub(i, i), nil, game)
                     task.wait(0.01)
                 end
             end)
@@ -1255,9 +1255,9 @@ while true do
                     end
                 else
                     pcall(function()
-                        vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
                         task.wait(0.01)
-                        vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+                        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
                     end)
                 end
             end
