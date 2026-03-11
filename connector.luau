@@ -366,6 +366,7 @@ local ScriptSourcesMap = {
 
 local ScriptInstanceMap = setmetatable({}, { __mode = "v" })
 local SourcesToMap, MappedSources = 0, 0
+local HasStartedMapping = false
 
 local function MapScriptSource(script)
     local debugId = script:GetDebugId()
@@ -416,22 +417,25 @@ local function GetScriptByDebugId(debugId)
     return nil
 end
 
-do
-    local function ShouldMapScript(script)        
-        local IsServerScript = script:IsA("Script") and script.RunContext == Enum.RunContext.Server
-        if IsServerScript then return false end
+local function ShouldMapScript(script)        
+    local IsServerScript = script:IsA("Script") and script.RunContext == Enum.RunContext.Server
+    if IsServerScript then return false end
 
-        local IsRobloxScript = script.RobloxLocked or script:IsDescendantOf(CoreGui) or script:IsDescendantOf(CorePackages)
-        if IsRobloxScript then return false end
+    local IsRobloxScript = script.RobloxLocked or script:IsDescendantOf(CoreGui) or script:IsDescendantOf(CorePackages)
+    if IsRobloxScript then return false end
 
-        local IsAlreadyMapped = ScriptSourcesMap[script:GetDebugId()]
-        if IsAlreadyMapped then return false end
+    local IsAlreadyMapped = ScriptSourcesMap[script:GetDebugId()]
+    if IsAlreadyMapped then return false end
 
-        local HasBytecode = pcall(getscriptbytecode, script)
-        if not HasBytecode then return false end
+    local HasBytecode = pcall(getscriptbytecode, script)
+    if not HasBytecode then return false end
 
-        return true
-    end
+    return true
+end
+
+local function StartScriptMapping()
+    if HasStartedMapping then return end
+    HasStartedMapping = true
 
     game.DescendantAdded:Connect(function(script)
         if not script:IsA("LuaSourceContainer") then
@@ -468,6 +472,11 @@ do
 
         ScriptSourcesMap.HasFinishedMapping = true
     end)
+end
+
+--// Start mapping immediately unless disabled \\--
+if not getgenv().DisableInitialScriptDecompMapping then
+    StartScriptMapping()
 end
 
 --// Parse Query \\--
@@ -945,6 +954,11 @@ while true do
     end)
 
     Bridge:BindToType("search-scripts-sources", function(data)
+        --// If mapping was deferred, start it now and wait for it to finish \\--
+        if not HasStartedMapping then
+            StartScriptMapping()
+        end
+
         assert(ScriptSourcesMap.HasFinishedMapping, "The bridge is still mapping all script sources (" .. tostring(MappedSources) .. "/" .. tostring(SourcesToMap) .. ") please try again later.")
 
         local stringMatchQueries = ParseQuery(data.query)
