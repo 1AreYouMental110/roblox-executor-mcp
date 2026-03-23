@@ -212,11 +212,11 @@ local WebSocketBridge = setmetatable({}, {__index = BaseBridge}); do
         end)
         
         local connectionStart = os.clock()
-        repeat task.wait(0.05) until wsConnection ~= nil or os.clock() - connectionStart > 3
+        repeat task.wait(0.05) until wsConnection ~= nil or os.clock() - connectionStart > 5
         
         if wsConnection == nil then
             task.cancel(connectionThread)
-            error("WebSocket connection timed out after 3 seconds")
+            error("WebSocket connection timed out after 5 seconds")
         end
         
         self.WebSocket = wsConnection
