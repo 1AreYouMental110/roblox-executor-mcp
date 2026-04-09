@@ -47,7 +47,7 @@ Follow the setup guide for your client:
 
 ### 3. Connect from Roblox
 
-Run `connector.luau` in your executor, or use the quick loader:
+Put `connector.luau` in your executor, or the quick loader below in Auto Execute:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/notpoiu/roblox-executor-mcp/refs/heads/main/connector.luau"))()
