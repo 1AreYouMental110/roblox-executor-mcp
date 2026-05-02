@@ -501,7 +501,7 @@ function sleep(ms) {
 }
 
 async function pollToolProgress(jobId, def) {
-    const startTime = Date.now();
+    const startTime = performance.now();
     $('toolOutputBody').textContent = 'Initializing…';
     $('toolResponseStatus').textContent = 'Pending';
     $('toolResponseStatus').className = 'tool-res-badge';
