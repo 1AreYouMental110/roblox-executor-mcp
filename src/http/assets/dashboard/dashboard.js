@@ -53,6 +53,17 @@ const scriptsCodeMenu = $('scriptsCodeMenu');
 const scriptsCodeSaveBtn = $('scriptsCodeSaveBtn');
 const scriptsCodeView = $('scriptsCodeView');
 
+function updateCodeOverflowHint() {
+    if (!scriptsCodeView) return;
+    const hasOverflow = scriptsCodeView.scrollWidth > scriptsCodeView.clientWidth;
+    const atEnd = scriptsCodeView.scrollLeft + scriptsCodeView.clientWidth >= scriptsCodeView.scrollWidth - 8;
+    scriptsCodeView.classList.toggle('has-overflow-x', hasOverflow && !atEnd);
+}
+
+// Dynamic right-edge overflow hint
+if (scriptsCodeView) scriptsCodeView.addEventListener('scroll', updateCodeOverflowHint);
+window.addEventListener('resize', updateCodeOverflowHint);
+
 let semanticIndexJobId = null;
 
 /* ── Helpers ──────────────────────────────────────────────── */
@@ -1031,6 +1042,8 @@ async function openScriptSource(debugId) {
 
         showCodeMode();
         updateCodeMenuReindex();
+
+        requestAnimationFrame(updateCodeOverflowHint);
     } catch(e) {
         showToast('Failed to load script source', 'error');
     }

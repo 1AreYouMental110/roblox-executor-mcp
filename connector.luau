@@ -623,9 +623,20 @@ local UploadMaxAttempts = 3
 local BytecodeTimeoutSeconds = 3
 local DecompileTimeoutSeconds = 12
 local MarkScriptProcessed
+local ActiveBridge = nil
+
+local function IsScriptMappingTransportReady(clientId)
+    return (
+        ActiveBridge ~= nil and
+        ActiveBridge.Connected == true and
+        ActiveBridge.ClientId ~= nil and
+        ActiveBridge.ClientId == clientId
+    )
+end
 
 local function UploadScriptSourceBatch(clientId, scripts, hasFinishedMapping)
     if not clientId then return false end
+    if not IsScriptMappingTransportReady(clientId) then return false end
 
     local ok, response = pcall(request, {
         Url = "http://" .. BridgeURL .. "/script-sources",
@@ -659,7 +670,7 @@ local function StartUploadQueue()
 
     UploadQueueThread = task.spawn(function()
         while true do
-            if #UploadQueue == 0 then
+            if #UploadQueue == 0 or not IsScriptMappingTransportReady(ScriptSourceUploadClientId) then
                 task.wait(UploadFlushInterval)
                 continue
             end
@@ -767,6 +778,7 @@ end
 local function MapScriptSource(script)
     local debugId = script:GetDebugId()
     if MappedScriptIds[debugId] then return end
+    if not IsScriptMappingTransportReady(ScriptSourceUploadClientId) then return end
 
     local source = DecompileScriptSource(script)
     if not source then
@@ -857,6 +869,8 @@ local function ShouldMapScript(script)
 end
 
 local function QueueScriptForMapping(script)
+    if not IsScriptMappingTransportReady(ScriptSourceUploadClientId) then return end
+
     local debugId = script:GetDebugId()
     if MappedScriptIds[debugId] or QueuedScriptIds[debugId] then return end
 
@@ -869,6 +883,8 @@ end
 
 local function StartScriptMapping(clientId)
     if HasStartedMapping then return end
+    if not IsScriptMappingTransportReady(clientId) then return end
+
     HasStartedMapping = true
     ScriptSourceUploadClientId = clientId
 
@@ -888,6 +904,8 @@ local function StartScriptMapping(clientId)
 
     --// Map script sources \\--
     task.spawn(function()
+        if not IsScriptMappingTransportReady(clientId) then return end
+
         local ValidScripts = {}
         for _, category in CategoriesToMap do
             for _, script in category do
@@ -942,6 +960,9 @@ local function WaitForBridgeClientId(Bridge)
         if Bridge.ClientId then
             return Bridge.ClientId
         end
+        if not Bridge.Connected then
+            return nil
+        end
         task.wait(0.05)
     until os.clock() > deadline
 
@@ -959,6 +980,7 @@ while true do
 
     local clientId = WaitForBridgeClientId(Bridge)
     if clientId then
+        ActiveBridge = Bridge
         StartUploadQueue()
 
         if ScriptSourceUploadClientId ~= clientId then
@@ -1494,6 +1516,10 @@ while true do
     end)
 
     Bridge:WaitForDisconnect()
+
+    if ActiveBridge == Bridge then
+        ActiveBridge = nil
+    end
     
     task.wait(1)
 end
