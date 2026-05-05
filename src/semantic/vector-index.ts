@@ -127,6 +127,7 @@ function getEmbeddingBatchSize(settings: SemanticSettings): number {
 function persistentEmbeddingKey(settings: SemanticSettings, embeddingId: string): string {
   return JSON.stringify([
     settings.provider,
+    settings.provider === "openai" ? settings.openaiBaseUrl : settings.ollamaBaseUrl,
     getSemanticProviderModel(settings),
     CHUNKING_VERSION,
     embeddingId,

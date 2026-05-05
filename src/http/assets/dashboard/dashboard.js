@@ -1358,6 +1358,7 @@ async function loadSettings() {
         const d = await res.json();
         settingsProvider = d.provider || 'openai';
         updateProviderUI();
+        $('settingsOpenaiUrl').value = d.openaiBaseUrl || '';
         $('settingsOpenaiModel').value = d.openaiModel || '';
         $('settingsOpenaiKey').value = d.openaiApiKeySet ? '••••••••' : '';
         $('settingsOllamaUrl').value = d.ollamaBaseUrl || '';
@@ -1391,7 +1392,10 @@ async function saveSettings(body) {
 $('saveProviderBtn').addEventListener('click', () => saveSettings({provider:settingsProvider}));
 $('saveOpenaiBtn').addEventListener('click', () => {
     const key = $('settingsOpenaiKey').value;
-    const body = { openaiModel: $('settingsOpenaiModel').value };
+    const body = {
+        openaiBaseUrl: $('settingsOpenaiUrl').value,
+        openaiModel: $('settingsOpenaiModel').value
+    };
     if (key && !key.startsWith('••')) body.openaiApiKey = key;
     saveSettings(body);
 });
@@ -1449,7 +1453,16 @@ $('deleteEmbeddingCacheBtn').addEventListener('click', () => deleteEmbeddingCach
 $('settingsTestBtn').addEventListener('click', async () => {
     const r = $('settingsTestResult'); r.innerHTML = 'Testing…'; r.className = '';
     try {
-        const res = await fetch('/api/semantic-settings/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:settingsProvider})});
+        const body = {
+            provider: settingsProvider,
+            openaiBaseUrl: $('settingsOpenaiUrl').value,
+            openaiModel: $('settingsOpenaiModel').value,
+            ollamaBaseUrl: $('settingsOllamaUrl').value,
+            ollamaModel: $('settingsOllamaModel').value
+        };
+        const key = $('settingsOpenaiKey').value;
+        if (key && !key.startsWith('••')) body.openaiApiKey = key;
+        const res = await fetch('/api/semantic-settings/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         const d = await res.json();
         r.textContent = d.ok ? `✓ Success (${d.dimensions||'?'}d, ${d.latencyMs||'?'}ms)` : '✗ ' + (d.error||'Failed');
         r.className = 'settings-test-result ' + (d.ok ? 'settings-test-result--ok' : 'settings-test-result--err');

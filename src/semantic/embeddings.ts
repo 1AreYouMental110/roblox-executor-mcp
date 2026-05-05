@@ -1,6 +1,7 @@
 import type { SemanticSettings } from "./settings.js";
 import {
   getSemanticProviderModel,
+  normalizeOpenAIBaseUrl,
   normalizeOllamaBaseUrl,
   validateSemanticSettings,
 } from "./settings.js";
@@ -61,32 +62,39 @@ async function readJsonResponse<T>(response: Response, provider: string): Promis
 }
 
 async function embedWithOpenAI(settings: SemanticSettings, inputs: string[]): Promise<number[][]> {
-  const response = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${settings.openaiApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: settings.openaiModel,
-      input: inputs,
-    }),
-  });
+  const baseUrl = normalizeOpenAIBaseUrl(settings.openaiBaseUrl, "https://api.openai.com/v1");
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/embeddings`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${settings.openaiApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: settings.openaiModel,
+        input: inputs,
+      }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new EmbeddingProviderError(`OpenAI-compatible embedding request failed for ${baseUrl}: ${message}`);
+  }
 
-  const parsed = await readJsonResponse<OpenAIEmbeddingResponse>(response, "OpenAI");
+  const parsed = await readJsonResponse<OpenAIEmbeddingResponse>(response, "OpenAI-compatible API");
   if (parsed.error?.message) {
-    throw new EmbeddingProviderError(`OpenAI embedding request failed: ${parsed.error.message}`);
+    throw new EmbeddingProviderError(`OpenAI-compatible embedding request failed: ${parsed.error.message}`);
   }
 
   const data = [...(parsed.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
   const vectors = assertVectors(
     data.map((item) => item.embedding),
-    "OpenAI"
+    "OpenAI-compatible API"
   );
 
   if (vectors.length !== inputs.length) {
     throw new EmbeddingProviderError(
-      `OpenAI returned ${vectors.length} embeddings for ${inputs.length} inputs.`
+      `OpenAI-compatible API returned ${vectors.length} embeddings for ${inputs.length} inputs.`
     );
   }
 

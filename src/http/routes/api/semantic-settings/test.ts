@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { testEmbeddingProvider } from "../../../../semantic/embeddings.js";
 import {
   loadSemanticSettings,
+  normalizeOpenAIBaseUrl,
   normalizeOllamaBaseUrl,
   type SemanticSettings,
   type SemanticSettingsInput,
@@ -15,6 +16,10 @@ function mergeSettings(settings: SemanticSettings, input: SemanticSettingsInput)
       typeof input.openaiApiKey === "string" && input.openaiApiKey.trim()
         ? input.openaiApiKey.trim()
         : settings.openaiApiKey,
+    openaiBaseUrl:
+      typeof input.openaiBaseUrl === "string" && input.openaiBaseUrl.trim()
+        ? normalizeOpenAIBaseUrl(input.openaiBaseUrl, settings.openaiBaseUrl)
+        : settings.openaiBaseUrl,
     openaiModel:
       typeof input.openaiModel === "string" && input.openaiModel.trim()
         ? input.openaiModel.trim()

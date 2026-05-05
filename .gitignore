@@ -4,6 +4,9 @@ dist/*
 # node modules
 node_modules/*
 
+# pnpm store
+.pnpm-store/*
+
 # Cursor
 .cursor/*
 

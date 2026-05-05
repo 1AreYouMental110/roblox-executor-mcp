@@ -24,17 +24,31 @@ An MCP server that allows Agents to interact with a running Roblox game client â
 
 ## Quick Start
 
-### 1. Build the server
+### 1. Clone the server
 
 ```bash
 git clone https://github.com/notpoiu/roblox-executor-mcp.git
 cd roblox-executor-mcp
-pnpm install && pnpm run build
 ```
 
-### 2. Add to your AI client
+### 2. Run the harness installer
 
-Follow the setup guide for your client:
+The installer builds the server, lets you choose AI clients, writes supported MCP configs, and prints the Roblox loader script.
+
+```bash
+npm run install:harnesses
+```
+
+It can also help with:
+
+- cross-machine setup on the same LAN
+- copying the Roblox loader to your clipboard
+- optional Ollama `embeddinggemma` setup for semantic indexing
+- pulling latest repo changes before install/build
+
+### Manual setup
+
+If you prefer to configure a client yourself, use the setup guide for your client:
 
 | Client | Guide |
 |---|---|
@@ -47,10 +61,11 @@ Follow the setup guide for your client:
 
 ### 3. Connect from Roblox
 
-Put `connector.luau` in your executor, or the quick loader below in Auto Execute:
+The installer prints this for you. Put it in your executor or Auto Execute:
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/notpoiu/roblox-executor-mcp/refs/heads/main/connector.luau"))()
+local bridgeUrl = getgenv().BridgeURL or "localhost:16384"
+loadstring(game:HttpGet("http://" .. bridgeUrl .. "/script.luau"))()
 ```
 
 **Optional settings** (set before the `loadstring`):
