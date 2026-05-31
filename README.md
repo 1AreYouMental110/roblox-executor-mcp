@@ -29,7 +29,7 @@ Use it to see connected Roblox clients, inspect scripts, run tools, view server 
 
 ## Tutorial
 
-[![roblox-executor-mcp installation guide](http://img.youtube.com/vi/4YhmMYqkNzE/0.jpg)](http://www.youtube.com/watch?v=4YhmMYqkNzE)
+[![roblox-executor-mcp installation guide](http://img.youtube.com/vi/Tcy5RNf1TRc/0.jpg)](https://youtube.com/watch?v=Tcy5RNf1TRc)
 
 ## Prerequisites
 
