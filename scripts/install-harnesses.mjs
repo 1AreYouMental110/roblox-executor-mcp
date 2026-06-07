@@ -141,7 +141,7 @@ async function main() {
 
   const restartList = selectedHarnesses.length > 0
     ? selectedHarnesses.map((h) => h.name).join(", ")
-    : "selected clients";
+    : "selected harnesses";
   console.log(`\n${colors.green}Done.${colors.reset} Restart ${restartList}, then connect Roblox with:`);
   const loaderSnippet = buildLoaderSnippet(crossMachine?.bridgeUrl);
   console.log(`${colors.cyan}${loaderSnippet}${colors.reset}`);
@@ -915,21 +915,21 @@ function section(title) {
 function log(status, message) {
   const icon = ASCII_MODE || PLAIN_MODE
     ? {
-        ok: "[OK]",
-        warn: "[!]",
-        info: "[i]",
-        run: ">",
-        skip: "[-]",
-        dry: "[dry]",
-      }[status] || "[-]"
+      ok: "[OK]",
+      warn: "[!]",
+      info: "[i]",
+      run: ">",
+      skip: "[-]",
+      dry: "[dry]",
+    }[status] || "[-]"
     : {
-        ok: `${colors.green}◆${colors.reset}`,
-        warn: `${colors.yellow}◆${colors.reset}`,
-        info: `${colors.cyan}◇${colors.reset}`,
-        run: `${colors.purple}●${colors.reset}`,
-        skip: `${colors.gray}◇${colors.reset}`,
-        dry: `${colors.yellow}◇${colors.reset}`,
-      }[status] || `${colors.gray}◇${colors.reset}`;
+      ok: `${colors.green}◆${colors.reset}`,
+      warn: `${colors.yellow}◆${colors.reset}`,
+      info: `${colors.cyan}◇${colors.reset}`,
+      run: `${colors.purple}●${colors.reset}`,
+      skip: `${colors.gray}◇${colors.reset}`,
+      dry: `${colors.yellow}◇${colors.reset}`,
+    }[status] || `${colors.gray}◇${colors.reset}`;
   console.log(`${icon} ${message}`);
 }
 
