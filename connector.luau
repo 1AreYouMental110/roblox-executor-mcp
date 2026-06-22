@@ -65,6 +65,43 @@ end
 local LuaEncode = loadstring(game:HttpGet("https://raw.githubusercontent.com/chadhyatt/LuaEncode/refs/heads/master/src/LuaEncode.lua"))()
 local cloneref = cloneref or function(x) return x end
 
+-- Output-size guard: prune deep / oversized return values BEFORE serialization so
+-- a huge DataModel dump can't blow up the bridge payload. Opt-in via the command's
+-- maxDepth / maxItems / maxString fields; only tables are recursed and a cycle
+-- guard (`seen`) prevents infinite recursion. Other types pass through untouched
+-- so LuaEncode still renders Instance paths, numbers, etc. normally.
+local function ClampValue(value, depth, maxDepth, maxItems, maxString, seen)
+    local t = typeof(value)
+    if t == "string" then
+        if maxString and #value > maxString then
+            return string.sub(value, 1, maxString) .. ("... [%d bytes truncated]"):format(#value - maxString)
+        end
+        return value
+    elseif t == "table" then
+        if maxDepth and depth >= maxDepth then
+            return "<table: max depth reached>"
+        end
+        if seen[value] then
+            return "<cycle>"
+        end
+        seen[value] = true
+        local out = {}
+        local count = 0
+        for k, v in pairs(value) do
+            count += 1
+            if maxItems and count > maxItems then
+                out["__truncated__"] = "... more items omitted"
+                break
+            end
+            out[k] = ClampValue(v, depth + 1, maxDepth, maxItems, maxString, seen)
+        end
+        seen[value] = nil
+        return out
+    else
+        return value
+    end
+end
+
 local KonstantDecompile = CreateDecompileFunction("Konstant", { Endpoint = "http://api.plusgiant5.com/konstant/decompile" })
 local MedalDecompile = CreateDecompileFunction("Medal", {
     Endpoint = "https://medal.upio.dev/decompile",
@@ -191,12 +228,12 @@ local BaseBridge = {}; do
                 }
             end
 
-            return self:FormatResponse(result, data.id, false)
+            return self:FormatResponse(result, data.id, false, data)
         end
         return nil
     end
-    
-    function BaseBridge:FormatResponse(message, id, isError)
+
+    function BaseBridge:FormatResponse(message, id, isError, opts)
         if isError then
             return {
                 error = tostring(message),
@@ -204,16 +241,33 @@ local BaseBridge = {}; do
                 id = id
             }
         end
-        
+
+        opts = opts or {}
+        local maxBytes = tonumber(opts.maxBytes) or 2000000   -- ~2 MB hard cap, always on
+        local maxDepth = tonumber(opts.maxDepth)              -- nil = unlimited (opt-in)
+        local maxItems = tonumber(opts.maxItems)              -- nil = unlimited (opt-in)
+        local maxString = tonumber(opts.maxString)            -- nil = unlimited (opt-in)
+
         local output = message
         if typeof(output) ~= "table" then
             output = { output }
         end
-    
+
+        if maxDepth or maxItems or maxString then
+            output = ClampValue(output, 0, maxDepth, maxItems, maxString, {})
+        end
+
+        local encoded = LuaEncode(output, {
+            Prettify = true
+        })
+
+        if #encoded > maxBytes then
+            encoded = string.sub(encoded, 1, maxBytes)
+                .. ("\n-- [output truncated: %d of %d bytes omitted]"):format(#encoded - maxBytes, #encoded)
+        end
+
         return {
-            output = LuaEncode(output, {
-                Prettify = true
-            }),
+            output = encoded,
             success = true,
             id = id
         }
@@ -409,6 +463,7 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
             local consecutiveFailures = 0
             
             while self.Connected do
+                local gotCommands = false
                 local success, _ = pcall(function()
                     local pollUrl = "http://" .. BridgeURL .. "/poll"
                     if self.ClientId then
@@ -431,25 +486,35 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
                     
                     consecutiveFailures = 0
     
-                    --// Handle response \\--
+                    --// Handle response (single command object OR a batch array) \\--
                     if response.Body and response.Body ~= "" then
                         local data = HttpService:JSONDecode(response.Body)
-                        if data == nil or data.type == nil then return end
-                        
-                        task.spawn(function()
-                            local result = self:HandleMessage(data)
-                            if result == nil then return end
-                            
-                            --// Send response back \\--
-                            request({
-                                Url = "http://" .. BridgeURL .. "/respond",
-                                Method = "POST",
-                                Headers = {
-                                    ["Content-Type"] = "application/json"
-                                },
-                                Body = HttpService:JSONEncode(result)
-                            })
-                        end)
+                        local commands
+                        if typeof(data) == "table" and data.type == nil and #data > 0 then
+                            commands = data            -- batch: array of command objects
+                        elseif typeof(data) == "table" and data.type ~= nil then
+                            commands = { data }        -- single command object
+                        else
+                            commands = {}
+                        end
+
+                        for _, cmd in ipairs(commands) do
+                            gotCommands = true
+                            task.spawn(function()
+                                local result = self:HandleMessage(cmd)
+                                if result == nil then return end
+
+                                --// Send response back \\--
+                                request({
+                                    Url = "http://" .. BridgeURL .. "/respond",
+                                    Method = "POST",
+                                    Headers = {
+                                        ["Content-Type"] = "application/json"
+                                    },
+                                    Body = HttpService:JSONEncode(result)
+                                })
+                            end)
+                        end
                     end
                 end)
     
@@ -459,8 +524,13 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
                         self.Connected = false
                     end
                 end
-    
-                task.wait(self.PollInterval)
+
+                -- Long-poll already blocks until work arrives or it times out, so
+                -- only sleep when we got nothing — and re-poll immediately after a
+                -- command so a queued batch drains with no inter-command delay.
+                if not gotCommands then
+                    task.wait(self.PollInterval)
+                end
             end
         end)
     

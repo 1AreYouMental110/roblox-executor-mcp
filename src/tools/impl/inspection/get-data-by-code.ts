@@ -24,15 +24,38 @@ export default function register(server: McpServer): void {
           )
           .optional()
           .default(15000),
+        maxDepth: z
+          .number()
+          .describe(
+            "Optional output guard: prune returned tables deeper than this many levels (replaced with a marker). Omit for unlimited."
+          )
+          .optional(),
+        maxItems: z
+          .number()
+          .describe(
+            "Optional output guard: keep at most this many entries per table. Omit for unlimited."
+          )
+          .optional(),
+        maxString: z
+          .number()
+          .describe(
+            "Optional output guard: truncate any returned string longer than this many bytes. Omit for unlimited."
+          )
+          .optional(),
       }),
     },
-    async ({ code, threadContext, timeout }) => {
+    async ({ code, threadContext, timeout, maxDepth, maxItems, maxString }) => {
       console.error(`Executing code in thread ${threadContext}...`);
       const clampedTimeout = Math.min(Math.max(timeout, 1000), 120000);
 
       return sendAndWait({
         type: "get-data-by-code",
-        data: { source: `setthreadidentity(${threadContext});${code}` },
+        data: {
+          source: `setthreadidentity(${threadContext});${code}`,
+          ...(maxDepth !== undefined ? { maxDepth } : {}),
+          ...(maxItems !== undefined ? { maxItems } : {}),
+          ...(maxString !== undefined ? { maxString } : {}),
+        },
         timeoutMs: clampedTimeout,
         failureMessage: (response) =>
           "Failed to get data by code. Response: " + JSON.stringify(response),

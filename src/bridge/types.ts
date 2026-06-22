@@ -12,7 +12,12 @@ export interface RobloxClient {
   transport: "ws" | "http";
   ws?: WebSocket;
   lastHttpPoll: number;
-  pendingHttpCommand: string | null;
+  // HTTP fallback transport: a FIFO queue of pending command JSON strings (was a
+  // single slot that silently dropped commands on rapid/parallel dispatch), plus
+  // an optional long-poll waiter invoked the instant a command is queued so a
+  // held /poll request returns immediately instead of waiting for the next tick.
+  pendingHttpCommands: string[];
+  pendingPollResolve: ((commands: string[]) => void) | null;
 }
 
 export interface RobloxResponse {

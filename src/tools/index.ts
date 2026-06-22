@@ -4,6 +4,14 @@ import registerListClients from "./impl/clients/list-clients.js";
 
 import registerExecute from "./impl/execution/execute.js";
 import registerExecuteFile from "./impl/execution/execute-file.js";
+import registerBatch from "./impl/execution/batch.js";
+
+import registerReadFile from "./impl/filesystem/read-file.js";
+import registerWriteFile from "./impl/filesystem/write-file.js";
+import registerAppendFile from "./impl/filesystem/append-file.js";
+import registerListFiles from "./impl/filesystem/list-files.js";
+import registerDeleteFile from "./impl/filesystem/delete-file.js";
+import registerMakeFolder from "./impl/filesystem/make-folder.js";
 
 import registerGetScriptContent from "./impl/inspection/get-script-content.js";
 import registerGetDataByCode from "./impl/inspection/get-data-by-code.js";
@@ -33,6 +41,14 @@ export function registerAllTools(server: McpServer): void {
 
   registerExecute(server);
   registerExecuteFile(server);
+  registerBatch(server);
+
+  registerReadFile(server);
+  registerWriteFile(server);
+  registerAppendFile(server);
+  registerListFiles(server);
+  registerDeleteFile(server);
+  registerMakeFolder(server);
 
   registerGetScriptContent(server);
   registerGetDataByCode(server);

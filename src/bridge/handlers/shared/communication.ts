@@ -56,7 +56,17 @@ export function SendToClient(target: RobloxClient, message: string): void {
   if (target.transport === "ws" && target.ws && target.ws.readyState === WebSocket.OPEN) {
     target.ws.send(message);
   } else if (target.transport === "http") {
-    target.pendingHttpCommand = message;
+    // Queue (never overwrite) so concurrent dispatches can't drop a command.
+    target.pendingHttpCommands.push(message);
+    // If a /poll request is currently held open, flush the whole queue to it
+    // now so the command is delivered immediately (long-poll, near-WS latency).
+    const waiter = target.pendingPollResolve;
+    if (waiter) {
+      target.pendingPollResolve = null;
+      const batch = target.pendingHttpCommands;
+      target.pendingHttpCommands = [];
+      waiter(batch);
+    }
   }
 }
 
