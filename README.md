@@ -34,6 +34,7 @@ Use it to see connected Roblox clients, inspect scripts, run tools, view server 
 ## Prerequisites
 
 - **Node.js** ≥ 18
+- **Bun** ≥ 1.3 for the interactive OpenTUI harness installer
 - **A Roblox executor** that supports `loadstring`, `request`, and (preferably) `WebSocket`
 
 ## Quick Start
@@ -53,10 +54,16 @@ The installer builds the server, lets you choose AI clients, writes supported MC
 npm run install:harnesses
 ```
 
-If your terminal has trouble with the interactive picker, use the plain numbered prompt:
+The picker is built with [OpenTUI](https://opentui.com/) and runs through Bun. `npm run install:harnesses` installs Bun first if it is not already available. It shows detected local clients by default; if none are detected, it warns you to install a harness first. Press `s` in the picker or pass `--show-all-harnesses` to reveal every supported config target. If your terminal has trouble with the interactive picker, use the plain numbered prompt:
 
 ```bash
 npm run install:harnesses -- --plain
+```
+
+The installer can also place the Roblox loader into a detected executor autoexec folder, such as MacSploit on macOS or supported Windows executor autoexec folders. Use the prompt, or run:
+
+```bash
+npm run getscript -- --autoexec
 ```
 
 It can also help with:

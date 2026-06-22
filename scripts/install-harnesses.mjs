@@ -5,12 +5,22 @@ import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import {
+  DEFAULT_BRIDGE_URL,
+  SERVER_PORT,
+  buildLoaderSnippet,
+  normalizeBridgeUrl,
+} from "../src/shared/connector-snippet.mjs";
+import {
+  getDetectedAutoexecTargets,
+  writeLoaderToAutoexec,
+} from "../src/shared/autoexec.mjs";
 
 const DEFAULT_SERVER_NAME = "roblox-mcp";
+const MAIN_REPO_URL = "https://github.com/notpoiu/roblox-executor-mcp.git";
 const SERVER_NAME = normalizeServerName(getArgValue("--server-name") || process.env.ROBLOX_MCP_SERVER_NAME || DEFAULT_SERVER_NAME);
 const CURRENT_REPO_DIR = process.cwd();
-const DEFAULT_BRIDGE_URL = "localhost:16384";
-const SERVER_PORT = 16384;
+const PACKAGE_VERSION = readPackageVersion();
 
 const colors = {
   reset: "\x1b[0m",
@@ -56,12 +66,75 @@ const ALL_HARNESSES = [
   { id: "manual", name: "Manual", group: "Others", config: { kind: "manualRecipe" } },
 ];
 
+const HARNESS_RESTART_SPECS = {
+  antigravity: {
+    key: "antigravity",
+    label: "Antigravity",
+    macApp: "Antigravity",
+    commands: ["antigravity"],
+    processNames: ["Antigravity"],
+    windowsExecutables: ["Antigravity.exe"],
+    windowsPaths: [
+      path.join(process.env.LOCALAPPDATA || homePath("AppData", "Local"), "Programs", "Antigravity", "Antigravity.exe"),
+    ],
+  },
+  cursor: {
+    key: "cursor",
+    label: "Cursor",
+    macApp: "Cursor",
+    commands: ["cursor"],
+    processNames: ["Cursor"],
+    windowsExecutables: ["Cursor.exe"],
+    windowsPaths: [
+      path.join(process.env.LOCALAPPDATA || homePath("AppData", "Local"), "Programs", "Cursor", "Cursor.exe"),
+    ],
+  },
+  "claude-desktop": {
+    key: "claude-desktop",
+    label: "Claude Desktop",
+    macApp: "Claude",
+    processNames: ["Claude"],
+    windowsExecutables: ["Claude.exe"],
+    windowsPaths: [
+      path.join(process.env.LOCALAPPDATA || homePath("AppData", "Local"), "Programs", "Claude", "Claude.exe"),
+    ],
+  },
+  "vscode-copilot": {
+    key: "vscode",
+    label: "VS Code",
+    macApp: "Visual Studio Code",
+    commands: ["code"],
+    processNames: ["Code", "Visual Studio Code"],
+    windowsExecutables: ["Code.exe"],
+    windowsPaths: [
+      path.join(process.env.LOCALAPPDATA || homePath("AppData", "Local"), "Programs", "Microsoft VS Code", "Code.exe"),
+      path.join(process.env.PROGRAMFILES || "C:\\Program Files", "Microsoft VS Code", "Code.exe"),
+      path.join(process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", "Microsoft VS Code", "Code.exe"),
+    ],
+  },
+  windsurf: {
+    key: "windsurf",
+    label: "Windsurf",
+    macApp: "Windsurf",
+    commands: ["windsurf"],
+    processNames: ["Windsurf"],
+    windowsExecutables: ["Windsurf.exe"],
+    windowsPaths: [
+      path.join(process.env.LOCALAPPDATA || homePath("AppData", "Local"), "Programs", "Windsurf", "Windsurf.exe"),
+    ],
+  },
+};
+
 const NON_INTERACTIVE = process.argv.includes("--yes") || process.argv.includes("-y");
 const DRY_RUN = process.argv.includes("--dry-run");
 const UPDATE_MODE = process.argv.includes("--update");
 const GET_SCRIPT_MODE = process.argv.includes("--get-script");
 const ASCII_MODE = process.platform === "win32" || process.argv.includes("--ascii");
 const PLAIN_MODE = process.argv.includes("--plain");
+const NO_OPENTUI = process.argv.includes("--no-opentui");
+const SHOW_ALL_HARNESSES = process.argv.includes("--show-all-harnesses") || process.argv.includes("--all-harnesses");
+const AUTOEXEC_MODE = process.argv.includes("--autoexec");
+const HARNESS_AVAILABILITY = detectAvailableHarnesses();
 if (PLAIN_MODE || process.env.NO_COLOR) {
   for (const key of Object.keys(colors)) {
     colors[key] = "";
@@ -93,7 +166,7 @@ async function main() {
     ? null
     : await configureCrossMachineSetup();
   const shouldPull =
-    !NON_INTERACTIVE && isGitRepository(CURRENT_REPO_DIR)
+    !NON_INTERACTIVE && canPullLatest(CURRENT_REPO_DIR)
       ? await askYesNo("Pull latest changes before install/build", false)
       : false;
   const semanticSettings = await readSemanticSettingsStatus();
@@ -135,6 +208,7 @@ async function main() {
   for (const harness of selectedHarnesses) {
     await configureHarness(harness, serverEntry, results);
   }
+  await maybeRestartHarnesses(selectedHarnesses, results);
 
   section("Summary");
   for (const item of results) {
@@ -149,7 +223,11 @@ async function main() {
   const restartList = selectedHarnesses.length > 0
     ? selectedHarnesses.map((h) => h.name).join(", ")
     : "selected harnesses";
-  console.log(`\n${colors.green}Done.${colors.reset} Restart ${restartList}, then connect Roblox with:`);
+  const restartedHarnesses = results.some((item) => /: restarted$/.test(item.message));
+  const doneText = restartedHarnesses || selectedHarnesses.length === 0
+    ? "Connect Roblox with:"
+    : `Restart ${restartList}, then connect Roblox with:`;
+  console.log(`\n${colors.green}Done.${colors.reset} ${doneText}`);
   const loaderSnippet = buildLoaderSnippet(crossMachine?.bridgeUrl);
   console.log(`${colors.cyan}${loaderSnippet}${colors.reset}`);
   if (crossMachine) {
@@ -158,6 +236,9 @@ async function main() {
       return false;
     });
     if (copied) log("ok", "Roblox loader copied to clipboard");
+  }
+  if (!NON_INTERACTIVE || AUTOEXEC_MODE) {
+    await maybeInstallAutoexec(loaderSnippet);
   }
   showCursor();
 }
@@ -175,7 +256,422 @@ async function runGetScriptMode() {
     return false;
   });
   if (copied) log("ok", "Roblox loader copied to clipboard");
+  if (!NON_INTERACTIVE || AUTOEXEC_MODE) {
+    await maybeInstallAutoexec(loaderSnippet);
+  }
   showCursor();
+}
+
+async function maybeInstallAutoexec(loaderSnippet) {
+  const targets = getDetectedAutoexecTargets();
+  if (!targets.length) {
+    log("warn", "No supported autoexec folder found. Known macOS and Windows executor paths are checked automatically.");
+    return;
+  }
+
+  const targetText = targets.map((target) => shrinkHome(target.folder)).join(", ");
+  const shouldInstall = AUTOEXEC_MODE || await askYesNo(`Install Roblox loader into autoexec (${targetText})`, false);
+  if (!shouldInstall) return;
+
+  const selectedTargets = AUTOEXEC_MODE ? targets : await selectAutoexecTargets(targets);
+  if (!selectedTargets.length) return;
+
+  const result = await writeLoaderToAutoexec(loaderSnippet, { targets: selectedTargets, dryRun: DRY_RUN });
+  if (!result.ok) {
+    log("warn", result.error || "Could not write autoexec script.");
+    return;
+  }
+  for (const item of result.written) {
+    const filePath = typeof item === "string" ? item : item.scriptPath;
+    const previousPath = typeof item === "string" ? null : item.previousPath;
+    const previousText = previousPath && previousPath !== filePath ? ` (existing connector detected at ${shrinkHome(previousPath)})` : "";
+    log(DRY_RUN ? "dry" : "ok", `${DRY_RUN ? "Would write" : "Wrote"} autoexec loader to ${shrinkHome(filePath)}${previousText}`);
+  }
+}
+
+async function selectAutoexecTargets(targets) {
+  if (!PLAIN_MODE && !NO_OPENTUI && process.stdin.isTTY && process.stdout.isTTY && process.versions.bun) {
+    try {
+      return await selectAutoexecTargetsOpenTui(targets);
+    } catch (error) {
+      log("warn", `OpenTUI autoexec picker unavailable: ${error.message || error}`);
+      log("info", "Falling back to the plain numbered prompt.");
+    }
+  }
+
+  if (targets.length <= 1) return targets;
+
+  console.log(`${colors.cyan}Detected autoexec targets:${colors.reset}`);
+  targets.forEach((target, index) => {
+    const installed = target.installedPath ? ` ${colors.gray}(existing connector: ${shrinkHome(target.installedPath)})${colors.reset}` : "";
+    console.log(`  ${String(index + 1).padStart(2)}. ${target.name} - ${shrinkHome(target.folder)}${installed}`);
+  });
+
+  const answer = await askInput("Autoexec target number(s), comma-separated, or 'all'", "all");
+  const raw = answer.trim().toLowerCase();
+  if (!raw || raw === "all") return targets;
+
+  const selected = [];
+  for (const part of raw.split(/[,\s]+/)) {
+    const index = Number(part);
+    if (!Number.isInteger(index) || index < 1 || index > targets.length) continue;
+    const target = targets[index - 1];
+    if (!selected.includes(target)) selected.push(target);
+  }
+  return selected;
+}
+
+async function selectAutoexecTargetsOpenTui(targets) {
+  const { Box, Text, createCliRenderer } = await loadOpenTui();
+  const ui = {
+    bg: "#050505",
+    left: "#0A0A0A",
+    right: "#171717",
+    topBox: "#101010",
+    searchBox: "#1D1D1D",
+    divider: "#222222",
+    text: "#E7E7E7",
+    muted: "#8E8E8E",
+    dim: "#626262",
+    blue: "#62A0FF",
+    peach: "#F4B183",
+    green: "#78D98C",
+    amber: "#B9853D",
+  };
+  const state = {
+    cursor: 0,
+    search: "",
+    mode: "list",
+    selected: new Set(targets.map(autoexecTargetKey)),
+  };
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let renderer;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      if (renderer) renderer.destroy();
+    };
+    const finish = (selectedTargets) => {
+      cleanup();
+      resolve(selectedTargets);
+    };
+    const visibleItems = () => {
+      const q = state.search.trim().toLowerCase();
+      return targets.filter((target) => {
+        const haystack = [
+          target.name,
+          target.id,
+          target.folder,
+          target.scriptPath,
+          target.installedPath,
+        ].filter(Boolean).join(" ").toLowerCase();
+        return !q || haystack.includes(q);
+      });
+    };
+    const render = () => {
+      if (!renderer || settled) return;
+      const items = visibleItems();
+      if (state.cursor >= items.length) state.cursor = Math.max(0, items.length - 1);
+      const activeItem = items[state.cursor] || null;
+      const selectedCount = state.selected.size;
+      const maxVisibleRows = getOpenTuiListHeight(renderer.height);
+      const start = getWindowStart(items, state.cursor, maxVisibleRows);
+      const windowed = items.slice(start, start + maxVisibleRows);
+      const hiddenBelow = Math.max(0, items.length - (start + windowed.length));
+      const scrollHint = start || hiddenBelow
+        ? `${start ? `${start} above` : ""}${start && hiddenBelow ? " · " : ""}${hiddenBelow ? `${hiddenBelow} below` : ""}`
+        : "ready";
+      const searchText = state.mode === "search"
+        ? `/ ${state.search}`
+        : state.search
+          ? `/ ${state.search}`
+          : "/ to search executors";
+      const searchHelpText = state.mode === "search"
+        ? "type to filter   enter done   esc done"
+        : "space toggle   a all   enter confirm   esc cancel";
+      const viewportWidth = Math.max(60, Number(renderer.width || process.stdout.columns) || 120);
+      const leftWidth = Math.max(38, Math.min(Math.floor(viewportWidth * 0.57), viewportWidth - 28));
+      const dividerWidth = 1;
+      const rightWidth = Math.max(26, viewportWidth - leftWidth - dividerWidth);
+
+      if (renderer.root.getRenderable("autoexec-target-root")) renderer.root.remove("autoexec-target-root");
+      renderer.root.add(
+        Box(
+          {
+            id: "autoexec-target-root",
+            width: "100%",
+            height: "100%",
+            backgroundColor: ui.bg,
+            flexDirection: "row",
+          },
+          Box(
+            {
+              width: leftWidth,
+              height: "100%",
+              paddingX: 3,
+              paddingY: 2,
+              flexDirection: "column",
+              overflow: "hidden",
+              backgroundColor: ui.left,
+            },
+            Box(
+              {
+                width: "100%",
+                height: 4,
+                flexDirection: "row",
+                backgroundColor: ui.topBox,
+              },
+              Box({ width: 1, height: "100%", backgroundColor: ui.blue }),
+              Box(
+                {
+                  flexGrow: 1,
+                  height: "100%",
+                  paddingX: 2,
+                  paddingY: 1,
+                  flexDirection: "column",
+                },
+                Text({
+                  content: "Autoexec Loader",
+                  fg: ui.text,
+                  attributes: 1,
+                  height: 1,
+                  truncate: true,
+                }),
+                Text({
+                  content: "Choose executor autoexec folders",
+                  fg: ui.muted,
+                  height: 1,
+                  truncate: true,
+                })
+              )
+            ),
+            Box(
+              {
+                width: "100%",
+                flexGrow: 1,
+                paddingX: 3,
+                paddingY: 3,
+                flexDirection: "column",
+                backgroundColor: ui.left,
+              },
+              Text({ content: "Detected Executors", fg: ui.muted, attributes: 1, height: 1, truncate: true }),
+              ...autoexecTargetListNodes(Box, Text, windowed, activeItem, state.selected, ui),
+              Box({ flexGrow: 1 }),
+              Text({
+                content: selectedCount ? `${selectedCount} target${selectedCount === 1 ? "" : "s"} selected` : "No targets selected",
+                fg: selectedCount ? ui.text : ui.amber,
+                attributes: 1,
+                height: 1,
+                truncate: true,
+              }),
+              Text({
+                content: selectedCount ? "Only selected executors will get the loader" : "Press space to select an executor",
+                fg: ui.dim,
+                height: 1,
+                truncate: true,
+              })
+            ),
+            Box(
+              {
+                width: "100%",
+                height: 4,
+                flexDirection: "row",
+                backgroundColor: ui.searchBox,
+              },
+              Box({ width: 1, height: "100%", backgroundColor: ui.blue }),
+              Box(
+                {
+                  flexGrow: 1,
+                  height: "100%",
+                  paddingX: 2,
+                  paddingY: 1,
+                  flexDirection: "column",
+                },
+                Text({
+                  content: searchText,
+                  fg: state.mode === "search" ? ui.peach : ui.text,
+                  attributes: state.mode === "search" ? 1 : 0,
+                  height: 1,
+                  truncate: true,
+                }),
+                Text({
+                  content: searchHelpText,
+                  fg: ui.dim,
+                  height: 1,
+                  truncate: true,
+                })
+              )
+            )
+          ),
+          Box({ width: dividerWidth, height: "100%", backgroundColor: ui.divider }),
+          Box(
+            {
+              width: rightWidth,
+              height: "100%",
+              overflow: "hidden",
+              backgroundColor: ui.right,
+              paddingX: 3,
+              paddingY: 2,
+              flexDirection: "column",
+            },
+            Text({ content: "Autoexec Installation", fg: ui.text, attributes: 1, height: 1, truncate: true }),
+            Box({ height: 2 }),
+            Text({ content: "Executors", fg: ui.text, attributes: 1, height: 1, truncate: true }),
+            Text({ content: `${targets.length} detected`, fg: ui.text, height: 1, truncate: true }),
+            Text({ content: `${selectedCount} selected`, fg: selectedCount ? ui.text : ui.muted, height: 1, truncate: true }),
+            Box({ height: 2 }),
+            Text({ content: "Target Info", fg: ui.text, attributes: 1, height: 1, truncate: true }),
+            ...autoexecTargetInfoNodes(Box, Text, activeItem, ui),
+            Box({ flexGrow: 1 }),
+            Text({ content: `Roblox Executor MCP v${PACKAGE_VERSION}`, fg: ui.text, attributes: 1, height: 1, truncate: true }),
+            Text({ content: `${scrollHint} · autoexec loader`, fg: ui.dim, height: 1, truncate: true })
+          )
+        )
+      );
+      renderer.requestRender();
+    };
+    const onKey = (key) => {
+      if (settled) return;
+      const items = visibleItems();
+      if (key.name === "c" && key.ctrl) {
+        cleanup();
+        process.exit(130);
+      }
+      if (state.mode === "search") {
+        if (key.name === "return" || key.name === "escape") state.mode = "list";
+        else if (key.name === "backspace") state.search = state.search.slice(0, -1);
+        else if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) state.search += key.sequence;
+        state.cursor = 0;
+        render();
+        return;
+      }
+      if (key.name === "down") state.cursor = Math.min(items.length - 1, state.cursor + 1);
+      else if (key.name === "up") state.cursor = Math.max(0, state.cursor - 1);
+      else if (key.name === "pagedown") state.cursor = Math.min(items.length - 1, state.cursor + getOpenTuiListHeight(renderer.height));
+      else if (key.name === "pageup") state.cursor = Math.max(0, state.cursor - getOpenTuiListHeight(renderer.height));
+      else if (key.name === "home") state.cursor = 0;
+      else if (key.name === "end") state.cursor = Math.max(0, items.length - 1);
+      else if (key.name === "space" && items[state.cursor]) toggle(state.selected, autoexecTargetKey(items[state.cursor]));
+      else if (key.name === "a") {
+        const allVisibleSelected = items.length > 0 && items.every((item) => state.selected.has(autoexecTargetKey(item)));
+        for (const item of items) {
+          allVisibleSelected ? state.selected.delete(autoexecTargetKey(item)) : state.selected.add(autoexecTargetKey(item));
+        }
+      } else if (key.name === "slash" || key.sequence === "/") state.mode = "search";
+      else if (key.name === "backspace") state.search = state.search.slice(0, -1);
+      else if (key.name === "q" || key.name === "escape") {
+        finish([]);
+        return;
+      } else if (key.name === "return") {
+        finish(targets.filter((target) => state.selected.has(autoexecTargetKey(target))));
+        return;
+      }
+      render();
+    };
+
+    createCliRenderer({
+      exitOnCtrlC: false,
+      clearOnShutdown: true,
+      screenMode: "alternate-screen",
+      consoleMode: "disabled",
+      backgroundColor: ui.bg,
+      targetFps: 30,
+    }).then((created) => {
+      if (settled) {
+        created.destroy();
+        return;
+      }
+      renderer = created;
+      renderer.keyInput.on("keypress", onKey);
+      renderer.on("resize", render);
+      hideCursor();
+      render();
+    }).catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+}
+
+function autoexecTargetListNodes(Box, Text, items, activeItem, selected, palette) {
+  const nodes = [];
+  for (const target of items) {
+    const active = target === activeItem;
+    const checked = selected.has(autoexecTargetKey(target));
+    const rowBg = active ? palette.peach : palette.left;
+    nodes.push(Box(
+      {
+        width: "100%",
+        height: 1,
+        flexDirection: "row",
+        backgroundColor: rowBg,
+      },
+      Text({
+        content: `  ${target.name}`,
+        fg: active ? palette.bg : checked ? palette.text : palette.muted,
+        bg: rowBg,
+        attributes: active || checked ? 1 : 0,
+        height: 1,
+        truncate: true,
+      }),
+      Box({ flexGrow: 1, height: 1, backgroundColor: rowBg }),
+      Text({
+        content: checked ? "✓ " : "  ",
+        fg: active ? "#0F5132" : palette.green,
+        bg: rowBg,
+        height: 1,
+        truncate: true,
+      })
+    ));
+  }
+  if (!nodes.length) {
+    nodes.push(Text({
+      content: "No executors match that search.",
+      fg: palette.amber,
+      height: 1,
+      truncate: true,
+      width: "100%",
+    }));
+  }
+  return nodes;
+}
+
+function autoexecTargetInfoNodes(Box, Text, target, palette) {
+  if (!target) {
+    return [
+      Text({ content: "No matches", fg: palette.dim, attributes: 1, height: 1, truncate: true }),
+      Text({ content: "Clear the search to show detected executors again.", fg: palette.muted, wrapMode: "word", height: 2 }),
+    ];
+  }
+
+  const detectionLines = autoexecDetectionInfoLines(target);
+  return [
+    infoDotRow(Box, Text, palette, palette.green, `Name: ${target.name}`, palette.text),
+    infoDotRow(Box, Text, palette, palette.green, "Detected", palette.text),
+    Box({ height: 1 }),
+    Text({ content: "Detection Info", fg: palette.text, attributes: 1, height: 1, truncate: true }),
+    ...detectionLines.map((line) => Text({
+      content: `- ${line}`,
+      fg: palette.muted,
+      height: 1,
+      truncate: true,
+    })),
+  ];
+}
+
+function autoexecDetectionInfoLines(target) {
+  const lines = [
+    shrinkHome(target.folder),
+    `writes ${path.basename(target.scriptPath)}`,
+  ];
+  if (target.installedPath) lines.push(`existing connector ${shrinkHome(target.installedPath)}`);
+  return lines;
+}
+
+function autoexecTargetKey(target) {
+  return target?.folder || target?.id || "";
 }
 
 async function promptForGetScriptBridgeUrl() {
@@ -196,6 +692,7 @@ async function runUpdateMode() {
 
   section("Update");
   log("info", `Using current repository: ${serverRoot}`);
+  await ensureUpdateGitReady(serverRoot, results);
 
   const processes = findMcpServerProcesses(serverRoot);
   if (processes.length) {
@@ -218,7 +715,7 @@ async function runUpdateMode() {
   }
 
   const shouldPull =
-    !NON_INTERACTIVE && isGitRepository(serverRoot)
+    !NON_INTERACTIVE && canPullLatest(serverRoot)
       ? await askYesNo("Pull latest changes before rebuild", false)
       : false;
   if (shouldPull) {
@@ -238,24 +735,203 @@ async function installServer(serverRoot, results, options = {}) {
   if (options.announceRepo !== false) {
     log("info", `Using current repository: ${serverRoot}`);
   }
-  const runner = commandExists("pnpm") ? "pnpm" : "npm";
+  const runner = commandExists("bun") ? "bun" : commandExists("pnpm") ? "pnpm" : "npm";
   await run(
     runner,
-    runner === "pnpm" ? ["install", "--ignore-scripts"] : ["install", "--ignore-scripts"],
+    ["install", "--ignore-scripts"],
     { cwd: serverRoot, label: `Installing dependencies with ${runner}` }
   );
-  await run(runner, runner === "pnpm" ? ["run", "build"] : ["run", "build"], { cwd: serverRoot, label: "Building server" });
+  await run(runner, ["run", "build"], { cwd: serverRoot, label: "Building server" });
   const serverEntry = path.join(serverRoot, "dist", "index.js");
   if (!exists(serverEntry)) {
+    if (DRY_RUN) {
+      results.push({ status: "dry", message: `Would prepare server at ${serverRoot}` });
+      results.push({ status: "dry", message: `Would verify server entry at ${serverEntry}` });
+      return;
+    }
     throw new Error(`Build completed, but ${serverEntry} was not created.`);
   }
-  results.push({ status: "ok", message: `Server ready at ${serverRoot}` });
-  results.push({ status: "ok", message: `Server entry verified at ${serverEntry}` });
+  results.push({ status: DRY_RUN ? "dry" : "ok", message: `${DRY_RUN ? "Would prepare" : "Server ready at"} ${serverRoot}` });
+  results.push({ status: DRY_RUN ? "dry" : "ok", message: `${DRY_RUN ? "Would verify" : "Server entry verified at"} ${serverEntry}` });
 }
 
 async function pullLatest(serverRoot, results) {
   await run("git", ["pull", "--ff-only"], { cwd: serverRoot, label: "Pulling latest changes" });
   results.push({ status: "ok", message: "Repository updated with latest changes" });
+}
+
+async function ensureUpdateGitReady(serverRoot, results) {
+  if (!commandExists("git")) {
+    const installed = await maybeInstallGit(results);
+    if (!installed) return false;
+  }
+
+  if (!isGitRepository(serverRoot)) {
+    results.push({
+      status: "warn",
+      message: "Current folder is not a git repository. Update can rebuild, but it cannot pull latest changes.",
+    });
+    return false;
+  }
+
+  const originUrl = getGitOriginUrl(serverRoot);
+  if (!originUrl) {
+    const shouldSetOrigin =
+      NON_INTERACTIVE || await askYesNo(`Set git origin to ${MAIN_REPO_URL}`, true);
+    if (shouldSetOrigin) {
+      await setGitOrigin(serverRoot, false, results);
+      return true;
+    }
+    results.push({ status: "warn", message: "Git origin is not set; skipping remote update setup." });
+    return false;
+  }
+
+  if (!isMainRepoRemote(originUrl)) {
+    const shouldSetOrigin =
+      NON_INTERACTIVE || await askYesNo(`Origin is ${originUrl}. Set it to the main repo`, false);
+    if (shouldSetOrigin) {
+      await setGitOrigin(serverRoot, true, results);
+      return true;
+    }
+    results.push({ status: "warn", message: `Git origin left unchanged: ${originUrl}` });
+    return false;
+  }
+
+  log("ok", `Git origin: ${originUrl}`);
+  return true;
+}
+
+async function maybeInstallGit(results) {
+  const plan = getGitInstallPlan();
+  if (!plan) {
+    results.push({
+      status: "warn",
+      message: "Git is not installed and no supported automatic installer was found.",
+    });
+    return false;
+  }
+
+  const shouldInstall =
+    NON_INTERACTIVE || await askYesNo(`Git is not installed. Install Git using ${plan.label}`, true);
+  if (!shouldInstall) {
+    results.push({ status: "warn", message: "Git is not installed; skipping pull/update remote checks." });
+    return false;
+  }
+
+  await runForeground(plan.command, plan.args, {
+    label: `Installing Git with ${plan.label}`,
+    cwd: CURRENT_REPO_DIR,
+  });
+
+  if (!commandExists("git")) {
+    results.push({
+      status: "warn",
+      message: "Git installer finished, but git is still not available in PATH. Restart the terminal and run update again.",
+    });
+    return false;
+  }
+
+  results.push({ status: "ok", message: "Git is installed." });
+  return true;
+}
+
+function getGitInstallPlan() {
+  if (process.platform === "darwin") {
+    if (commandExists("brew")) {
+      return { label: "Homebrew", command: "brew", args: ["install", "git"] };
+    }
+    if (exists("/usr/bin/xcode-select")) {
+      return { label: "Xcode Command Line Tools", command: "xcode-select", args: ["--install"] };
+    }
+    return null;
+  }
+
+  if (process.platform === "win32") {
+    if (commandExists("winget")) {
+      return {
+        label: "winget",
+        command: "winget",
+        args: ["install", "--id", "Git.Git", "-e", "--source", "winget"],
+      };
+    }
+    return null;
+  }
+
+  const isRoot = process.getuid && process.getuid() === 0;
+  const sudo = !isRoot && commandExists("sudo") ? "sudo" : null;
+  if (!isRoot && !sudo) return null;
+  const rootPrefix = sudo ? [sudo] : [];
+  if (commandExists("apt-get")) {
+    return {
+      label: "apt",
+      command: rootPrefix[0] || "sh",
+      args: rootPrefix[0]
+        ? ["sh", "-c", "apt-get update && apt-get install -y git"]
+        : ["-c", "apt-get update && apt-get install -y git"],
+    };
+  }
+  if (commandExists("dnf")) {
+    return {
+      label: "dnf",
+      command: rootPrefix[0] || "dnf",
+      args: rootPrefix[0] ? ["dnf", "install", "-y", "git"] : ["install", "-y", "git"],
+    };
+  }
+  if (commandExists("yum")) {
+    return {
+      label: "yum",
+      command: rootPrefix[0] || "yum",
+      args: rootPrefix[0] ? ["yum", "install", "-y", "git"] : ["install", "-y", "git"],
+    };
+  }
+  if (commandExists("pacman")) {
+    return {
+      label: "pacman",
+      command: rootPrefix[0] || "pacman",
+      args: rootPrefix[0] ? ["pacman", "-S", "--needed", "--noconfirm", "git"] : ["-S", "--needed", "--noconfirm", "git"],
+    };
+  }
+  return null;
+}
+
+function getGitOriginUrl(serverRoot) {
+  const result = spawnSync("git", ["remote", "get-url", "origin"], {
+    cwd: serverRoot,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) return null;
+  return result.stdout.trim() || null;
+}
+
+function canPullLatest(serverRoot) {
+  return commandExists("git") && isGitRepository(serverRoot) && Boolean(getGitOriginUrl(serverRoot));
+}
+
+function isMainRepoRemote(value) {
+  return normalizeGitRemote(value) === normalizeGitRemote(MAIN_REPO_URL);
+}
+
+function normalizeGitRemote(value) {
+  let remote = String(value || "").trim();
+  remote = remote.replace(/^git@github\.com:/i, "https://github.com/");
+  remote = remote.replace(/^ssh:\/\/git@github\.com\//i, "https://github.com/");
+  remote = remote.replace(/^http:\/\//i, "https://");
+  remote = remote.replace(/\/+$/, "");
+  remote = remote.replace(/\.git$/i, "");
+  return remote.toLowerCase();
+}
+
+async function setGitOrigin(serverRoot, replaceExisting, results) {
+  const action = replaceExisting ? "set-url" : "add";
+  await run("git", ["remote", action, "origin", MAIN_REPO_URL], {
+    cwd: serverRoot,
+    label: `${replaceExisting ? "Updating" : "Setting"} git origin`,
+  });
+  results.push({
+    status: DRY_RUN ? "dry" : "ok",
+    message: `${DRY_RUN ? "Would set git origin" : "Git origin set"} to ${MAIN_REPO_URL}`,
+  });
 }
 
 function findMcpServerProcesses(serverRoot) {
@@ -406,26 +1082,6 @@ function getLocalLanIp() {
     }
   }
   return candidates.find((ip) => /^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) || candidates[0] || null;
-}
-
-function normalizeBridgeUrl(value) {
-  const trimmed = String(value || "").trim().replace(/\/+$/, "");
-  if (!trimmed) return DEFAULT_BRIDGE_URL;
-  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-  try {
-    const url = new URL(withProtocol);
-    if (!url.port) url.port = String(SERVER_PORT);
-    return `${url.hostname}:${url.port}`;
-  } catch {
-    return DEFAULT_BRIDGE_URL;
-  }
-}
-
-function buildLoaderSnippet(bridgeUrl = DEFAULT_BRIDGE_URL) {
-  if (bridgeUrl === DEFAULT_BRIDGE_URL) {
-    return `local bridgeUrl = getgenv().BridgeURL or "${DEFAULT_BRIDGE_URL}"\nloadstring(game:HttpGet("http://" .. bridgeUrl .. "/script.luau"))()`;
-  }
-  return `getgenv().BridgeURL = "${bridgeUrl}"\nlocal bridgeUrl = getgenv().BridgeURL or "${DEFAULT_BRIDGE_URL}"\nloadstring(game:HttpGet("http://" .. bridgeUrl .. "/script.luau"))()`;
 }
 
 async function copyToClipboard(text) {
@@ -592,6 +1248,213 @@ async function configureHarness(harness, serverEntry, results) {
   } catch (error) {
     results.push({ status: "warn", message: `${harness.name}: ${error.message || error}` });
   }
+}
+
+async function maybeRestartHarnesses(selectedHarnesses, results) {
+  if (NON_INTERACTIVE || !selectedHarnesses.length) return;
+
+  const restartable = findRestartableHarnesses(selectedHarnesses);
+  if (!restartable.length) return;
+
+  section("Restart Harnesses");
+  const names = restartable.map((target) => target.label).join(", ");
+  const shouldRestart = await askYesNo(`Restart running harnesses now (${names})`, false);
+  if (!shouldRestart) {
+    results.push({ status: "skip", message: `Harness restart skipped (${names})` });
+    return;
+  }
+
+  for (const target of restartable) {
+    restartHarnessTarget(target, results);
+  }
+}
+
+function findRestartableHarnesses(selectedHarnesses) {
+  const targets = [];
+  const seen = new Set();
+  for (const harness of selectedHarnesses) {
+    const spec = HARNESS_RESTART_SPECS[harness.id];
+    if (!spec || seen.has(spec.key)) continue;
+    const target = detectRestartTarget(spec);
+    if (!target) continue;
+    seen.add(spec.key);
+    targets.push(target);
+  }
+  return targets;
+}
+
+function detectRestartTarget(spec) {
+  if (process.platform === "darwin") return detectMacRestartTarget(spec);
+  if (process.platform === "win32") return detectWindowsRestartTarget(spec);
+  return detectUnixRestartTarget(spec);
+}
+
+function detectMacRestartTarget(spec) {
+  if (!spec.macApp || !macAppIsRunning(spec.macApp)) return null;
+  return {
+    ...spec,
+    mode: "mac-app",
+  };
+}
+
+function detectWindowsRestartTarget(spec) {
+  const processName = (spec.processNames || []).find((name) => windowsProcessIsRunning(name));
+  if (!processName) return null;
+  const launcher = findRestartLauncher(spec);
+  if (!launcher) return null;
+  return {
+    ...spec,
+    mode: "windows-process",
+    processName,
+    launcher,
+  };
+}
+
+function detectUnixRestartTarget(spec) {
+  const processName = (spec.processNames || []).find((name) => unixProcessIsRunning(name));
+  if (!processName) return null;
+  const command = (spec.commands || []).find((item) => commandExists(item));
+  if (!command) return null;
+  return {
+    ...spec,
+    mode: "unix-command",
+    processName,
+    command,
+  };
+}
+
+function restartHarnessTarget(target, results) {
+  if (DRY_RUN) {
+    results.push({ status: "dry", message: `Would restart ${target.label}` });
+    return;
+  }
+
+  try {
+    if (target.mode === "mac-app") restartMacApp(target.macApp);
+    else if (target.mode === "windows-process") restartWindowsProcess(target);
+    else if (target.mode === "unix-command") restartUnixProcess(target);
+    else throw new Error(`unsupported restart mode ${target.mode}`);
+    results.push({ status: "ok", message: `${target.label}: restarted` });
+  } catch (error) {
+    results.push({ status: "warn", message: `${target.label}: could not restart: ${error.message || error}` });
+  }
+}
+
+function restartMacApp(appName) {
+  const quit = spawnSync("osascript", ["-e", `tell application "${escapeAppleScript(appName)}" to quit`], {
+    encoding: "utf8",
+    stdio: "pipe",
+    shell: false,
+  });
+  if (quit.status !== 0) {
+    throw new Error((quit.stderr || quit.stdout || `osascript exited ${quit.status}`).trim());
+  }
+  const open = spawnSync("open", ["-a", appName], {
+    encoding: "utf8",
+    stdio: "pipe",
+    shell: false,
+  });
+  if (open.status !== 0) {
+    throw new Error((open.stderr || open.stdout || `open exited ${open.status}`).trim());
+  }
+}
+
+function restartWindowsProcess(target) {
+  const exeName = windowsExeName(target.processName);
+  const stop = spawnSync("taskkill", ["/IM", exeName, "/T"], {
+    encoding: "utf8",
+    stdio: "pipe",
+    shell: false,
+  });
+  if (stop.status !== 0 && !String(stop.stderr || stop.stdout).toLowerCase().includes("not found")) {
+    throw new Error((stop.stderr || stop.stdout || `taskkill exited ${stop.status}`).trim());
+  }
+  launchRestartTarget(target.launcher);
+}
+
+function restartUnixProcess(target) {
+  const stop = spawnSync("pkill", ["-x", target.processName], {
+    encoding: "utf8",
+    stdio: "pipe",
+    shell: false,
+  });
+  if (stop.status !== 0 && stop.status !== 1) {
+    throw new Error((stop.stderr || stop.stdout || `pkill exited ${stop.status}`).trim());
+  }
+  launchRestartTarget({ command: target.command, args: [] });
+}
+
+function launchRestartTarget(launcher) {
+  const child = spawn(launcher.command, launcher.args || [], {
+    detached: true,
+    stdio: "ignore",
+    shell: false,
+  });
+  child.unref();
+}
+
+function findRestartLauncher(spec) {
+  for (const filePath of spec.windowsPaths || []) {
+    if (exists(filePath)) return { command: filePath, args: [] };
+  }
+  for (const executable of spec.windowsExecutables || []) {
+    const found = findOnPath(executable);
+    if (found) return { command: found, args: [] };
+  }
+  for (const command of spec.commands || []) {
+    if (commandExists(command)) return { command: spawnCommand(command), args: [] };
+  }
+  return null;
+}
+
+function macAppIsRunning(appName) {
+  const result = spawnSync("osascript", ["-e", `application "${escapeAppleScript(appName)}" is running`], {
+    encoding: "utf8",
+    stdio: "pipe",
+    shell: false,
+  });
+  return result.status === 0 && result.stdout.trim() === "true";
+}
+
+function windowsProcessIsRunning(name) {
+  const processName = name.replace(/\.exe$/i, "");
+  const script = `if (Get-Process -Name '${escapePowerShellSingleQuoted(processName)}' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", script], {
+    stdio: "ignore",
+    shell: false,
+  });
+  return result.status === 0;
+}
+
+function unixProcessIsRunning(name) {
+  return spawnSync("pgrep", ["-x", name], { stdio: "ignore", shell: false }).status === 0;
+}
+
+function windowsExeName(name) {
+  return name.toLowerCase().endsWith(".exe") ? name : `${name}.exe`;
+}
+
+function findOnPath(command) {
+  const pathEnv = process.env.PATH || "";
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of extensions) {
+      const candidate = path.join(dir, process.platform === "win32" && !command.toLowerCase().endsWith(ext.toLowerCase()) ? command + ext : command);
+      if (exists(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function escapeAppleScript(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function escapePowerShellSingleQuoted(value) {
+  return String(value).replace(/'/g, "''");
 }
 
 async function configureClaudeCode(serverEntry) {
@@ -769,70 +1632,261 @@ async function run(command, args, options = {}) {
   });
 }
 
+async function runForeground(command, args, options = {}) {
+  if (DRY_RUN) {
+    log("dry", `${options.label || command}: ${[command, ...args.map(quote)].join(" ")}`);
+    return;
+  }
+
+  log("run", options.label || [command, ...args].join(" "));
+  await new Promise((resolve, reject) => {
+    const commandToRun = spawnCommand(command);
+    const useShell = process.platform === "win32" && commandToRun.endsWith(".cmd");
+    let child;
+    try {
+      child = spawn(commandToRun, args, {
+        cwd: options.cwd || process.cwd(),
+        env: process.env,
+        stdio: "inherit",
+        shell: useShell,
+        windowsHide: false,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with code ${code}`));
+    });
+  });
+}
+
 async function selectHarnesses(initial) {
-  if (PLAIN_MODE || !process.stdin.isTTY || !process.stdout.isTTY) {
+  if (PLAIN_MODE || NO_OPENTUI || !process.stdin.isTTY || !process.stdout.isTTY) {
     return selectHarnessesPlain(initial);
   }
 
+  try {
+    return await selectHarnessesOpenTui(initial);
+  } catch (error) {
+    log("warn", `OpenTUI picker unavailable: ${error.message || error}`);
+    log("info", "Falling back to the plain numbered prompt.");
+    return selectHarnessesPlain(initial);
+  }
+}
+
+async function selectHarnessesOpenTui(initial) {
+  const { Box, Text, createCliRenderer } = await loadOpenTui();
+  const ui = {
+    bg: "#050505",
+    left: "#0A0A0A",
+    right: "#171717",
+    topBox: "#101010",
+    searchBox: "#1D1D1D",
+    divider: "#222222",
+    text: "#E7E7E7",
+    muted: "#8E8E8E",
+    dim: "#626262",
+    blue: "#62A0FF",
+    peach: "#F4B183",
+    green: "#78D98C",
+    amber: "#B9853D",
+  };
   const state = {
     cursor: 0,
     search: "",
     selected: new Set(initial),
     mode: "list",
+    showAll: SHOW_ALL_HARNESSES,
   };
-  const stdin = process.stdin;
-  readline.emitKeypressEvents(stdin);
-  if (stdin.isTTY) stdin.setRawMode(true);
-  enterAlternateScreen();
-  hideCursor();
 
-  return await new Promise((resolve) => {
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let renderer;
     const cleanup = () => {
-      if (stdin.isTTY) stdin.setRawMode(false);
-      showCursor();
-      if (!ASCII_MODE) process.stdout.write("\x1b[2J\x1b[H");
-      else process.stdout.write("\n");
-      leaveAlternateScreen();
-      stdin.off("keypress", onKey);
+      if (settled) return;
+      settled = true;
+      if (renderer) renderer.destroy();
     };
     const visibleItems = () => {
       const q = state.search.trim().toLowerCase();
-      return ALL_HARNESSES.filter((h) => !q || h.name.toLowerCase().includes(q));
+      return pickerHarnesses(state.showAll).filter((h) => !q || `${h.name} ${h.id} ${h.group}`.toLowerCase().includes(q));
     };
     const render = () => {
+      if (!renderer || settled) return;
       const items = visibleItems();
       if (state.cursor >= items.length) state.cursor = Math.max(0, items.length - 1);
-      process.stdout.write(ASCII_MODE ? "\x1b[2J\x1b[1;1H\n" : "\x1b[2J\x1b[H");
-      printBanner();
-      console.log(`${colors.green}${ASCII_MODE ? ">" : "◆"}${colors.reset} Which harnesses do you want to install Roblox Executor MCP into?\n`);
-      console.log(`${colors.green}Selected:${colors.reset} ${formatSelection(state.selected)}\n`);
-      let currentGroup = "";
-      const maxVisibleRows = getHarnessWindowHeight();
+      const selectedCount = state.selected.size;
+      const activeItem = items[state.cursor] || null;
+      const baseItems = pickerHarnesses(state.showAll);
+      const noDetectedHarnesses = !state.showAll && baseItems.length === 0;
+      const activeAvailability = activeItem ? HARNESS_AVAILABILITY.get(activeItem.id) : null;
+      const maxVisibleRows = getOpenTuiListHeight(renderer.height);
       const start = getWindowStart(items, state.cursor, maxVisibleRows);
       const windowed = items.slice(start, start + maxVisibleRows);
-      for (const item of windowed) {
-        if (item.group !== currentGroup) {
-          currentGroup = item.group;
-          const line = ASCII_MODE ? "--" : "──";
-          const fill = ASCII_MODE ? "-" : "─";
-          console.log(`  ${colors.gray}${line}${colors.reset} ${colors.bold}${currentGroup}${colors.reset} ${colors.gray}${fill.repeat(Math.max(8, 32 - currentGroup.length))}${colors.reset}`);
-        }
-        const active = item === items[state.cursor];
-        const marker = state.selected.has(item.id)
-          ? `${colors.green}${ASCII_MODE ? "x" : "●"}${colors.reset}`
-          : `${colors.gray}${ASCII_MODE ? "o" : "○"}${colors.reset}`;
-        const pointer = active ? `${colors.cyan}›${colors.reset}` : " ";
-        const support = item.config?.experimental ? ` ${colors.yellow}experimental${colors.reset}` : "";
-        const label = active ? `${colors.inverse}${item.name}${colors.reset}` : item.name;
-        console.log(`${pointer} ${marker} ${label}${support}`);
-      }
-      if (start > 0) console.log(colors.gray + `  ${start} above` + colors.reset);
       const hiddenBelow = Math.max(0, items.length - (start + windowed.length));
-      if (hiddenBelow > 0) console.log(colors.gray + `  ${hiddenBelow} more match the search` + colors.reset);
-      console.log(`\n${colors.gray}Search:${colors.reset} ${state.search}${state.mode === "search" ? "█" : ""}`);
-      console.log(`${colors.gray}↑↓ move, space select, a all, / search, enter confirm, q quit${colors.reset}`);
+      const modeLabel = state.showAll ? "all supported" : `${baseItems.length} detected`;
+      const scrollHint = start || hiddenBelow
+        ? `${start ? `${start} above` : ""}${start && hiddenBelow ? " · " : ""}${hiddenBelow ? `${hiddenBelow} below` : ""}`
+        : "ready";
+      const searchText = state.mode === "search"
+        ? `/ ${state.search}`
+        : state.search
+        ? `/ ${state.search}`
+        : "/ to search harnesses";
+      const searchHelpText = state.mode === "search"
+        ? "type to filter   enter done   esc done"
+        : "space toggle   enter confirm   esc quit";
+      const selectedCountText = `${String(selectedCount).padStart(2, " ")} selected`;
+      const viewportWidth = Math.max(60, Number(renderer.width || process.stdout.columns) || 120);
+      const leftWidth = Math.max(36, Math.min(Math.floor(viewportWidth * 0.57), viewportWidth - 26));
+      const dividerWidth = 1;
+      const rightWidth = Math.max(24, viewportWidth - leftWidth - dividerWidth);
+
+      if (renderer.root.getRenderable("installer-root")) renderer.root.remove("installer-root");
+      renderer.root.add(
+        Box(
+          {
+            id: "installer-root",
+            width: "100%",
+            height: "100%",
+            backgroundColor: ui.bg,
+            flexDirection: "row",
+          },
+            Box(
+              {
+                width: leftWidth,
+                height: "100%",
+                paddingX: 3,
+                paddingY: 2,
+                flexDirection: "column",
+                overflow: "hidden",
+                backgroundColor: ui.left,
+              },
+              Box(
+                {
+                  width: "100%",
+                  height: 4,
+                  flexDirection: "row",
+                  backgroundColor: ui.topBox,
+                },
+                Box({ width: 1, height: "100%", backgroundColor: ui.blue }),
+                Box(
+                  {
+                    flexGrow: 1,
+                    height: "100%",
+                    paddingX: 2,
+                    paddingY: 1,
+                    flexDirection: "column",
+                  },
+                  Text({
+                    content: "Roblox Executor MCP",
+                    fg: ui.text,
+                    attributes: 1,
+                    height: 1,
+                    truncate: true,
+                  }),
+                  Text({
+                    content: "Select harnesses to use",
+                    fg: ui.muted,
+                    height: 1,
+                    truncate: true,
+                  })
+                )
+              ),
+              Box(
+                {
+                  width: "100%",
+                  flexGrow: 1,
+                  paddingX: 3,
+                  paddingY: 3,
+                  flexDirection: "column",
+                  backgroundColor: ui.left,
+                },
+                ...harnessListNodes(Box, Text, windowed, items[state.cursor], state.selected, {
+                  palette: ui,
+                  emptyMessage: noDetectedHarnesses
+                    ? "No local harnesses detected. Install one first, or press s to show all."
+                    : "No harnesses match that search.",
+                }),
+                Box({ flexGrow: 1 }),
+                Text({
+                  content: state.showAll ? "Showing all harnesses" : "Show other harnesses",
+                  fg: ui.text,
+                  attributes: 1,
+                  height: 1,
+                  truncate: true,
+                }),
+                Text({
+                  content: state.showAll ? "press s to return to detected only" : "press s",
+                  fg: ui.dim,
+                  height: 1,
+                  truncate: true,
+                })
+              ),
+              Box(
+                {
+                  width: "100%",
+                  height: 4,
+                  flexDirection: "row",
+                  backgroundColor: ui.searchBox,
+                },
+                Box({ width: 1, height: "100%", backgroundColor: ui.blue }),
+                Box(
+                  {
+                    flexGrow: 1,
+                    height: "100%",
+                    paddingX: 2,
+                    paddingY: 1,
+                    flexDirection: "column",
+                  },
+                  Text({
+                    content: searchText,
+                    fg: state.mode === "search" ? ui.peach : ui.text,
+                    attributes: state.mode === "search" ? 1 : 0,
+                    height: 1,
+                    truncate: true,
+                  }),
+                  Text({
+                    content: searchHelpText,
+                    fg: ui.dim,
+                    height: 1,
+                    truncate: true,
+                  })
+                )
+              )
+            ),
+            Box({ width: dividerWidth, height: "100%", backgroundColor: ui.divider }),
+            Box(
+              {
+                width: rightWidth,
+                height: "100%",
+                overflow: "hidden",
+                backgroundColor: ui.right,
+                paddingX: 3,
+                paddingY: 2,
+                flexDirection: "column",
+              },
+              Text({ content: "MCP Installation Selection", fg: ui.text, attributes: 1, height: 1, truncate: true }),
+              Box({ height: 2 }),
+              Text({ content: "Harnesses", fg: ui.text, attributes: 1, height: 1, truncate: true }),
+              Text({ content: `${baseItems.length} detected`, fg: noDetectedHarnesses ? ui.amber : ui.text, height: 1, truncate: true }),
+              Text({ content: selectedCountText, fg: selectedCount ? ui.text : ui.muted, height: 1, truncate: true }),
+              Box({ height: 2 }),
+              Text({ content: "Harness Info", fg: ui.text, attributes: 1, height: 1, truncate: true }),
+              ...harnessInfoNodes(Box, Text, activeItem, activeAvailability, noDetectedHarnesses, ui),
+              Box({ flexGrow: 1 }),
+              Text({ content: `Roblox Executor MCP v${PACKAGE_VERSION}`, fg: ui.text, attributes: 1, height: 1, truncate: true }),
+              Text({ content: `${scrollHint} · ${modeLabel}`, fg: ui.dim, height: 1, truncate: true })
+            )
+        )
+      );
+      renderer.requestRender();
     };
-    const onKey = (_str, key) => {
+    const onKey = (key) => {
+      if (settled) return;
       const items = visibleItems();
       if (key.name === "c" && key.ctrl) {
         cleanup();
@@ -848,43 +1902,481 @@ async function selectHarnesses(initial) {
       }
       if (key.name === "down") state.cursor = Math.min(items.length - 1, state.cursor + 1);
       else if (key.name === "up") state.cursor = Math.max(0, state.cursor - 1);
+      else if (key.name === "pagedown") state.cursor = Math.min(items.length - 1, state.cursor + getOpenTuiListHeight(renderer.height));
+      else if (key.name === "pageup") state.cursor = Math.max(0, state.cursor - getOpenTuiListHeight(renderer.height));
+      else if (key.name === "home") state.cursor = 0;
+      else if (key.name === "end") state.cursor = Math.max(0, items.length - 1);
       else if (key.name === "space" && items[state.cursor]) toggle(state.selected, items[state.cursor].id);
       else if (key.name === "a") {
         const allVisibleSelected = items.every((item) => state.selected.has(item.id));
         for (const item of items) allVisibleSelected ? state.selected.delete(item.id) : state.selected.add(item.id);
-      } else if (key.name === "slash") state.mode = "search";
+      } else if (key.name === "s") {
+        state.showAll = !state.showAll;
+        state.cursor = 0;
+      } else if (key.name === "r") {
+        const recommended = pickerHarnesses(state.showAll).filter((item) => item.group === "Recommended");
+        const allRecommendedSelected = recommended.every((item) => state.selected.has(item.id));
+        for (const item of recommended) allRecommendedSelected ? state.selected.delete(item.id) : state.selected.add(item.id);
+      } else if (key.name === "slash" || key.sequence === "/") state.mode = "search";
       else if (key.name === "backspace") state.search = state.search.slice(0, -1);
       else if (key.name === "q" || key.name === "escape") {
         cleanup();
         process.exit(0);
       } else if (key.name === "return") {
+        const selected = new Set(state.selected);
         cleanup();
-        resolve(state.selected);
+        resolve(selected);
         return;
       }
       render();
     };
-    stdin.on("keypress", onKey);
-    render();
+
+    createCliRenderer({
+      exitOnCtrlC: false,
+      clearOnShutdown: true,
+      screenMode: "alternate-screen",
+      consoleMode: "disabled",
+      backgroundColor: ui.bg,
+      targetFps: 30,
+    }).then((created) => {
+      if (settled) {
+        created.destroy();
+        return;
+      }
+      renderer = created;
+      renderer.keyInput.on("keypress", onKey);
+      renderer.on("resize", render);
+      render();
+    }).catch((error) => {
+      cleanup();
+      reject(error);
+    });
   });
+}
+
+async function loadOpenTui() {
+  if (!process.versions.bun) {
+    throw new Error("run this command with Bun, or pass --plain for the compatibility prompt");
+  }
+
+  try {
+    return await import("@opentui/core");
+  } catch (firstError) {
+    const install = spawnSync("bun", ["install", "--ignore-scripts"], {
+      cwd: CURRENT_REPO_DIR,
+      stdio: "inherit",
+      shell: false,
+    });
+    if (install.status !== 0) {
+      throw new Error(`could not install OpenTUI dependency with bun install: ${firstError.message || firstError}`);
+    }
+    return await import("@opentui/core");
+  }
+}
+
+function harnessListNodes(Box, Text, items, activeItem, selected, options = {}) {
+  const palette = options.palette || {
+    bg: "#050505",
+    left: "#0A0A0A",
+    text: "#E7E7E7",
+    muted: "#8E8E8E",
+    dim: "#626262",
+    peach: "#F4B183",
+    green: "#78D98C",
+    amber: "#B9853D",
+  };
+  const nodes = [];
+  let currentGroup = "";
+  for (const item of items) {
+    if (item.group !== currentGroup) {
+      currentGroup = item.group;
+      nodes.push(Text({
+        content: currentGroup,
+        fg: palette.muted,
+        attributes: 1,
+        height: 1,
+        truncate: true,
+        width: "100%",
+      }));
+    }
+    const active = item === activeItem;
+    const checked = selected.has(item.id);
+    const flag = item.config?.experimental ? " experimental" : "";
+    const rowBg = active ? palette.peach : (palette.left || palette.bg);
+    nodes.push(Box(
+      {
+        width: "100%",
+        height: 1,
+        flexDirection: "row",
+        backgroundColor: rowBg,
+      },
+      Text({
+        content: `  ${item.name}${flag}`,
+        fg: active ? palette.bg : checked ? palette.text : palette.muted,
+        bg: rowBg,
+        attributes: active || checked ? 1 : 0,
+        height: 1,
+        truncate: true,
+      }),
+      Box({ flexGrow: 1, height: 1, backgroundColor: rowBg }),
+      Text({
+        content: checked ? "✓ Enabled " : "          ",
+        fg: active ? "#0F5132" : palette.green,
+        bg: rowBg,
+        height: 1,
+        truncate: true,
+      })
+    ));
+  }
+  if (!nodes.length) {
+    const message = options.emptyMessage || "No harnesses match that search.";
+    nodes.push(Text({ content: message, fg: palette.amber, height: 1, truncate: true, width: "100%" }));
+  }
+  return nodes;
+}
+
+function harnessInfoNodes(Box, Text, harness, availability, noDetectedHarnesses, palette) {
+  if (!harness) {
+    return [
+      Text({
+        content: "No matches",
+        fg: palette.dim,
+        attributes: 1,
+        height: 1,
+        truncate: true,
+      }),
+      Text({
+        content: noDetectedHarnesses
+          ? "Install a supported harness first, or press s to show every target."
+          : "Clear the search to show harnesses again.",
+        fg: noDetectedHarnesses ? palette.amber : palette.muted,
+        wrapMode: "word",
+        height: 3,
+      }),
+    ];
+  }
+
+  const detected = Boolean(availability?.detected);
+  const dotColor = detected ? palette.green : palette.amber;
+  const detectionLines = harnessDetectionInfoLines(harness, availability);
+  return [
+    infoDotRow(Box, Text, palette, dotColor, `Name: ${harness.name}`, palette.text),
+    infoDotRow(Box, Text, palette, dotColor, detected ? "Detected" : "Not detected", palette.text),
+    Box({ height: 1 }),
+    Text({
+      content: "Detection Info",
+      fg: palette.text,
+      attributes: 1,
+      height: 1,
+      truncate: true,
+    }),
+    ...detectionLines.map((line) => Text({
+      content: `- ${line}`,
+      fg: palette.muted,
+      height: 1,
+      truncate: true,
+    })),
+  ];
+}
+
+function infoDotRow(Box, Text, palette, dotColor, content, contentColor) {
+  return Box(
+    {
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      backgroundColor: palette.right,
+    },
+    Text({ content: "● ", fg: dotColor, height: 1 }),
+    Text({ content, fg: contentColor, height: 1, truncate: true })
+  );
+}
+
+function harnessDetectionInfoLines(harness, availability) {
+  const lines = [];
+  if (availability?.reason) lines.push(availability.reason);
+  if (harness.config?.kind) lines.push(harness.config.kind);
+  for (const filePath of configPaths(harness.config).slice(0, 2)) {
+    lines.push(shrinkHome(filePath));
+  }
+  if (harness.config?.experimental) lines.push("experimental path");
+  return [...new Set(lines)].slice(0, 5);
+}
+
+function getOpenTuiListHeight(rendererHeight) {
+  const rows = Number(rendererHeight || process.stdout.rows) || 30;
+  return Math.max(4, Math.min(18, rows - 18));
+}
+
+function pickerHarnesses(showAll) {
+  if (showAll) return ALL_HARNESSES;
+  return detectedHarnesses();
+}
+
+function detectedHarnesses() {
+  return ALL_HARNESSES.filter((harness) => HARNESS_AVAILABILITY.get(harness.id)?.detected);
+}
+
+function detectAvailableHarnesses() {
+  const map = new Map();
+  for (const harness of ALL_HARNESSES) {
+    map.set(harness.id, detectHarnessAvailability(harness));
+  }
+  return map;
+}
+
+function detectHarnessAvailability(harness) {
+  const checksById = {
+    codex: [
+      commandCheck("codex"),
+      pathCheck(homePath(".codex")),
+      configCheck(harness),
+    ],
+    "claude-code": [
+      commandCheck("claude"),
+    ],
+    opencode: [
+      commandCheck("opencode"),
+      pathCheck(homePath(".config", "opencode")),
+      configCheck(harness),
+    ],
+    cursor: [
+      commandCheck("cursor"),
+      commandCheck("cursor-agent"),
+      appCheck("Cursor"),
+      pathCheck(homePath(".cursor")),
+      configCheck(harness),
+    ],
+    antigravity: [
+      commandCheck("antigravity"),
+      appCheck("Antigravity"),
+      pathCheck(homePath(".gemini", "antigravity")),
+      configCheck(harness),
+    ],
+    "gemini-cli": [
+      commandCheck("gemini"),
+      pathCheck(homePath(".gemini")),
+      configCheck(harness),
+    ],
+    "github-copilot": [
+      pathCheck(homePath(".copilot")),
+      extensionCheck("github.copilot"),
+      configCheck(harness),
+    ],
+    "vscode-copilot": [
+      commandCheck("code"),
+      appCheck("Visual Studio Code"),
+      extensionCheck("github.copilot"),
+    ],
+    amp: [
+      commandCheck("amp"),
+      extensionCheck("amp"),
+    ],
+    cline: [
+      pathCheck(homePath(".cline")),
+      extensionCheck("saoudrizwan.claude-dev"),
+      extensionCheck("cline"),
+      configCheck(harness),
+    ],
+    "claude-desktop": [
+      appCheck("Claude"),
+      configCheck(harness),
+    ],
+    "deep-agents": [
+      pathCheck(homePath(".deepagents")),
+      configCheck(harness),
+    ],
+    "kimi-cli": [
+      commandCheck("kimi"),
+      pathCheck(homePath(".kimi")),
+      configCheck(harness),
+    ],
+    augment: [
+      commandCheck("augment"),
+      pathCheck(homePath(".augment")),
+      extensionCheck("augment"),
+      configCheck(harness),
+    ],
+    continue: [
+      commandCheck("continue"),
+      pathCheck(homePath(".continue")),
+      extensionCheck("continue"),
+      configCheck(harness),
+    ],
+    "devin-terminal": [
+      commandCheck("devin"),
+      pathCheck(homePath(".config", "devin")),
+      configCheck(harness),
+    ],
+    goose: [
+      commandCheck("goose"),
+      pathCheck(path.dirname(gooseConfigPath())),
+      configCheck(harness),
+    ],
+    "iflow-cli": [
+      commandCheck("iflow"),
+      pathCheck(homePath(".iflow")),
+      configCheck(harness),
+    ],
+    "kilo-code": [
+      commandCheck("kilo"),
+      pathCheck(homePath(".config", "kilo")),
+      extensionCheck("kilo"),
+      configCheck(harness),
+    ],
+    "kiro-cli": [
+      commandCheck("kiro"),
+      pathCheck(homePath(".kiro")),
+      configCheck(harness),
+    ],
+    "mistral-vibe": [
+      commandCheck("vibe"),
+      pathCheck(homePath(".vibe")),
+      configCheck(harness),
+    ],
+    openhands: [
+      commandCheck("openhands"),
+      pathCheck(homePath(".openhands")),
+      configCheck(harness),
+    ],
+    "qwen-code": [
+      commandCheck("qwen"),
+      pathCheck(homePath(".qwen")),
+      configCheck(harness),
+    ],
+    "rovo-dev": [
+      commandCheck("rovo"),
+      pathCheck(homePath(".rovodev")),
+      configCheck(harness),
+    ],
+    "roo-code": [
+      pathCheck(path.dirname(vscodeGlobalStoragePath("rooveterinaryinc.roo-cline", "settings", "mcp_settings.json"))),
+      extensionCheck("rooveterinaryinc.roo-cline"),
+      extensionCheck("roo-cline"),
+      configCheck(harness),
+    ],
+    "tabnine-cli": [
+      commandCheck("tabnine"),
+      pathCheck(homePath(".tabnine")),
+      configCheck(harness),
+    ],
+    windsurf: [
+      commandCheck("windsurf"),
+      appCheck("Windsurf"),
+      pathCheck(homePath(".codeium", "windsurf")),
+      configCheck(harness),
+    ],
+    manual: [],
+  };
+
+  for (const check of checksById[harness.id] || [configCheck(harness)]) {
+    const result = check();
+    if (result) return { detected: true, reason: result };
+  }
+  return { detected: false, reason: "" };
+}
+
+function commandCheck(command) {
+  return () => commandExists(command) ? `command ${command}` : "";
+}
+
+function pathCheck(filePath) {
+  return () => exists(filePath) ? shrinkHome(filePath) : "";
+}
+
+function configCheck(harness) {
+  return () => {
+    const found = configPaths(harness.config).find((filePath) => exists(filePath));
+    return found ? `config ${shrinkHome(found)}` : "";
+  };
+}
+
+function appCheck(name) {
+  return () => {
+    for (const filePath of appCandidatePaths(name)) {
+      if (exists(filePath)) return shrinkHome(filePath);
+    }
+    return "";
+  };
+}
+
+function extensionCheck(fragment) {
+  return () => {
+    const found = findEditorExtension(fragment);
+    return found ? `extension ${found}` : "";
+  };
+}
+
+function appCandidatePaths(name) {
+  if (process.platform === "darwin") {
+    return [
+      path.join("/Applications", `${name}.app`),
+      path.join(os.homedir(), "Applications", `${name}.app`),
+    ];
+  }
+  if (process.platform === "win32") {
+    return [
+      path.join(process.env.LOCALAPPDATA || homePath("AppData", "Local"), "Programs", name),
+      path.join(process.env.PROGRAMFILES || "C:\\Program Files", name),
+      path.join(process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", name),
+    ];
+  }
+  return [
+    path.join(process.env.XDG_CONFIG_HOME || homePath(".config"), name.toLowerCase()),
+    path.join(process.env.XDG_DATA_HOME || homePath(".local", "share"), name.toLowerCase()),
+  ];
+}
+
+function findEditorExtension(fragment) {
+  const q = fragment.toLowerCase();
+  const roots = [
+    homePath(".vscode", "extensions"),
+    homePath(".cursor", "extensions"),
+    homePath(".windsurf", "extensions"),
+    homePath(".codeium", "windsurf", "extensions"),
+  ];
+  for (const root of roots) {
+    if (!exists(root)) continue;
+    try {
+      const match = fsSync.readdirSync(root).find((entry) => entry.toLowerCase().includes(q));
+      if (match) return match;
+    } catch {
+      // Ignore unreadable editor extension folders.
+    }
+  }
+  return "";
 }
 
 async function selectHarnessesPlain(initial) {
   const selected = new Set(initial);
+  const harnesses = pickerHarnesses(SHOW_ALL_HARNESSES);
+  const hiddenCount = Math.max(0, ALL_HARNESSES.length - harnesses.length);
   console.log(`${colors.cyan}${colors.bold}Roblox Executor MCP${colors.reset}`);
-  console.log(`${colors.gray}Choose harnesses by number. Press Enter for none.${colors.reset}\n`);
+  if (!harnesses.length) {
+    console.log(`${colors.yellow}No local AI harnesses were detected.${colors.reset}`);
+    console.log(`${colors.gray}Install Codex, Claude Code, Cursor, VS Code, or another supported harness first.${colors.reset}`);
+    console.log(`${colors.gray}If detection missed your install, rerun with --show-all-harnesses to list every supported target.${colors.reset}\n`);
+    return selected;
+  }
+  if (hiddenCount > 0) {
+    console.log(`${colors.gray}Showing ${harnesses.length} detected harnesses. Use --show-all-harnesses to list all ${ALL_HARNESSES.length}. Press Enter for none.${colors.reset}\n`);
+  } else {
+    console.log(`${colors.gray}Choose harnesses by number. Press Enter for none.${colors.reset}\n`);
+  }
 
   let index = 1;
   const numbered = [];
   let currentGroup = "";
-  for (const harness of ALL_HARNESSES) {
+  for (const harness of harnesses) {
     if (harness.group !== currentGroup) {
       currentGroup = harness.group;
       console.log(`${colors.bold}${currentGroup}${colors.reset}`);
     }
     numbered.push(harness);
     const experimental = harness.config?.experimental ? ` ${colors.yellow}(experimental)${colors.reset}` : "";
-    console.log(`  ${String(index).padStart(2)}. ${harness.name}${experimental}`);
+    const availability = HARNESS_AVAILABILITY.get(harness.id);
+    const reason = availability?.detected ? ` ${colors.gray}- ${availability.reason}${colors.reset}` : "";
+    console.log(`  ${String(index).padStart(2)}. ${harness.name}${experimental}${reason}`);
     index += 1;
   }
 
@@ -895,7 +2387,7 @@ async function selectHarnessesPlain(initial) {
   const raw = answer.trim().toLowerCase();
   if (!raw) return selected;
   if (raw === "all") {
-    for (const harness of ALL_HARNESSES) selected.add(harness.id);
+    for (const harness of harnesses) selected.add(harness.id);
     return selected;
   }
 
@@ -909,6 +2401,14 @@ async function selectHarnessesPlain(initial) {
 }
 
 async function askInput(label, fallback) {
+  if (!PLAIN_MODE && !NO_OPENTUI && process.stdin.isTTY && process.stdout.isTTY && process.versions.bun) {
+    try {
+      return await askInputOpenTui(label, fallback);
+    } catch (error) {
+      log("warn", `OpenTUI input unavailable: ${error.message || error}`);
+    }
+  }
+
   showCursor();
   const answer = await prompt(`${colors.bold}${label}${colors.reset} ${colors.gray}(${fallback})${colors.reset}: `);
   hideCursor();
@@ -916,11 +2416,450 @@ async function askInput(label, fallback) {
 }
 
 async function askYesNo(label, fallback) {
+  if (!PLAIN_MODE && !NO_OPENTUI && process.stdin.isTTY && process.stdout.isTTY && process.versions.bun) {
+    try {
+      return await askYesNoOpenTui(label, fallback);
+    } catch (error) {
+      log("warn", `OpenTUI prompt unavailable: ${error.message || error}`);
+    }
+  }
+
   showCursor();
   const answer = await prompt(`${colors.bold}${label}${colors.reset} ${colors.gray}${fallback ? "(Y/n)" : "(y/N)"}${colors.reset}: `);
   hideCursor();
   if (!answer.trim()) return fallback;
   return /^y(es)?$/i.test(answer.trim());
+}
+
+async function askYesNoOpenTui(label, fallback) {
+  const { Box, Text, createCliRenderer } = await loadOpenTui();
+  const copy = yesNoDialogCopy(label, fallback);
+  const palette = {
+    bg: "#050505",
+    panel: "#171717",
+    panelDark: "#101010",
+    text: "#E7E7E7",
+    muted: "#8E8E8E",
+    dim: "#626262",
+    blue: "#62A0FF",
+    peach: "#F4B183",
+  };
+  const state = {
+    choice: fallback ? "yes" : "no",
+  };
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let renderer;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      if (renderer) renderer.destroy();
+    };
+    const finish = (value) => {
+      cleanup();
+      resolve(value);
+    };
+    const render = () => {
+      if (!renderer || settled) return;
+      const viewportWidth = Math.max(60, Number(renderer.width || process.stdout.columns) || 100);
+      const viewportHeight = Math.max(20, Number(renderer.height || process.stdout.rows) || 30);
+      const dialogWidth = Math.max(54, Math.min(82, viewportWidth - 8));
+      const dialogHeight = 14;
+      const topPad = Math.max(1, Math.floor((viewportHeight - dialogHeight) / 2));
+      const sidePad = Math.max(0, Math.floor((viewportWidth - dialogWidth) / 2));
+      const yesActive = state.choice === "yes";
+      const noActive = state.choice === "no";
+
+      if (renderer.root.getRenderable("yes-no-dialog-root")) renderer.root.remove("yes-no-dialog-root");
+      renderer.root.add(
+        Box(
+          {
+            id: "yes-no-dialog-root",
+            width: "100%",
+            height: "100%",
+            backgroundColor: palette.bg,
+            flexDirection: "column",
+          },
+          Box({ height: topPad, width: "100%", backgroundColor: palette.bg }),
+          Box(
+            {
+              width: "100%",
+              height: dialogHeight,
+              flexDirection: "row",
+              backgroundColor: palette.bg,
+            },
+            Box({ width: sidePad, height: "100%", backgroundColor: palette.bg }),
+            Box(
+              {
+                width: dialogWidth,
+                height: "100%",
+                backgroundColor: palette.panel,
+                flexDirection: "row",
+              },
+              Box({ width: 1, height: "100%", backgroundColor: palette.blue }),
+              Box(
+                {
+                  flexGrow: 1,
+                  height: "100%",
+                  paddingX: 2,
+                  paddingY: 1,
+                  flexDirection: "column",
+                },
+                Box(
+                  {
+                    width: "100%",
+                    height: 2,
+                    flexDirection: "column",
+                    backgroundColor: palette.panel,
+                  },
+                  Box(
+                    {
+                      width: "100%",
+                      height: 1,
+                      flexDirection: "row",
+                      backgroundColor: palette.panel,
+                    },
+                    Text({ content: copy.title, fg: palette.text, attributes: 1, height: 1, truncate: true }),
+                    Box({ flexGrow: 1, height: 1, backgroundColor: palette.panel }),
+                    Text({ content: "esc", fg: palette.muted, height: 1, truncate: true })
+                  ),
+                  Text({ content: "left/right or tab to choose   enter to confirm   y/n works", fg: palette.dim, height: 1, truncate: true })
+                ),
+                Box({ height: 1 }),
+                Text({ content: copy.message, fg: palette.text, attributes: 1, height: 1, truncate: true }),
+                Text({ content: copy.detail, fg: palette.muted, wrapMode: "word", height: 3 }),
+                Box({ flexGrow: 1 }),
+                Box(
+                  {
+                    width: "100%",
+                    height: 1,
+                    flexDirection: "row",
+                    backgroundColor: palette.panel,
+                  },
+                  Box({ flexGrow: 1, height: 1, backgroundColor: palette.panel }),
+                  dialogButton(Text, palette, copy.noLabel, noActive),
+                  Text({ content: "  ", fg: palette.muted, bg: palette.panel, height: 1 }),
+                  dialogButton(Text, palette, copy.yesLabel, yesActive)
+                )
+              )
+            )
+          )
+        )
+      );
+      renderer.requestRender();
+    };
+    const onKey = (key) => {
+      if (settled) return;
+      if (key.name === "c" && key.ctrl) {
+        cleanup();
+        process.exit(130);
+      }
+      if (key.name === "left" || key.name === "right" || key.name === "tab") {
+        state.choice = state.choice === "yes" ? "no" : "yes";
+      } else if (key.name === "y" || key.sequence === "y" || key.sequence === "Y") {
+        finish(true);
+        return;
+      } else if (key.name === "n" || key.sequence === "n" || key.sequence === "N") {
+        finish(false);
+        return;
+      } else if (key.name === "return") {
+        finish(state.choice === "yes");
+        return;
+      } else if (key.name === "escape" || key.name === "q") {
+        finish(fallback);
+        return;
+      }
+      render();
+    };
+
+    createCliRenderer({
+      exitOnCtrlC: false,
+      clearOnShutdown: true,
+      screenMode: "alternate-screen",
+      consoleMode: "disabled",
+      backgroundColor: palette.bg,
+      targetFps: 30,
+    }).then((created) => {
+      if (settled) {
+        created.destroy();
+        return;
+      }
+      renderer = created;
+      renderer.keyInput.on("keypress", onKey);
+      renderer.on("resize", render);
+      hideCursor();
+      render();
+    }).catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+}
+
+function dialogButton(Text, palette, label, active) {
+  return Text({
+    content: ` ${label} `,
+    fg: active ? palette.bg : palette.muted,
+    bg: active ? palette.peach : palette.panel,
+    attributes: active ? 1 : 0,
+    height: 1,
+    truncate: true,
+  });
+}
+
+async function askInputOpenTui(label, fallback = "") {
+  const { Box, Text, createCliRenderer } = await loadOpenTui();
+  const copy = inputDialogCopy(label, fallback);
+  const palette = {
+    bg: "#050505",
+    panel: "#171717",
+    input: "#1D1D1D",
+    text: "#E7E7E7",
+    muted: "#8E8E8E",
+    dim: "#626262",
+    blue: "#62A0FF",
+    peach: "#F4B183",
+  };
+  const state = {
+    value: "",
+  };
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let renderer;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      if (renderer) renderer.destroy();
+    };
+    const finish = () => {
+      const value = state.value.trim() || fallback;
+      cleanup();
+      resolve(value);
+    };
+    const render = () => {
+      if (!renderer || settled) return;
+      const viewportWidth = Math.max(60, Number(renderer.width || process.stdout.columns) || 100);
+      const viewportHeight = Math.max(20, Number(renderer.height || process.stdout.rows) || 30);
+      const dialogWidth = Math.max(54, Math.min(82, viewportWidth - 8));
+      const dialogHeight = 14;
+      const topPad = Math.max(1, Math.floor((viewportHeight - dialogHeight) / 2));
+      const sidePad = Math.max(0, Math.floor((viewportWidth - dialogWidth) / 2));
+      const displayValue = state.value || fallback || "";
+      const inputPrefix = state.value ? "> " : "default ";
+      const inputColor = state.value ? palette.text : palette.muted;
+
+      if (renderer.root.getRenderable("input-dialog-root")) renderer.root.remove("input-dialog-root");
+      renderer.root.add(
+        Box(
+          {
+            id: "input-dialog-root",
+            width: "100%",
+            height: "100%",
+            backgroundColor: palette.bg,
+            flexDirection: "column",
+          },
+          Box({ height: topPad, width: "100%", backgroundColor: palette.bg }),
+          Box(
+            {
+              width: "100%",
+              height: dialogHeight,
+              flexDirection: "row",
+              backgroundColor: palette.bg,
+            },
+            Box({ width: sidePad, height: "100%", backgroundColor: palette.bg }),
+            Box(
+              {
+                width: dialogWidth,
+                height: "100%",
+                backgroundColor: palette.panel,
+                flexDirection: "row",
+              },
+              Box({ width: 1, height: "100%", backgroundColor: palette.blue }),
+              Box(
+                {
+                  flexGrow: 1,
+                  height: "100%",
+                  paddingX: 2,
+                  paddingY: 1,
+                  flexDirection: "column",
+                },
+                Box(
+                  {
+                    width: "100%",
+                    height: 2,
+                    flexDirection: "column",
+                    backgroundColor: palette.panel,
+                  },
+                  Box(
+                    {
+                      width: "100%",
+                      height: 1,
+                      flexDirection: "row",
+                      backgroundColor: palette.panel,
+                    },
+                    Text({ content: copy.title, fg: palette.text, attributes: 1, height: 1, truncate: true }),
+                    Box({ flexGrow: 1, height: 1, backgroundColor: palette.panel }),
+                    Text({ content: "esc", fg: palette.muted, height: 1, truncate: true })
+                  ),
+                  Text({ content: "type a value   enter to confirm   esc uses default", fg: palette.dim, height: 1, truncate: true })
+                ),
+                Box({ height: 1 }),
+                Text({ content: copy.message, fg: palette.text, attributes: 1, height: 1, truncate: true }),
+                Text({ content: copy.detail, fg: palette.muted, wrapMode: "word", height: 3 }),
+                Box({ flexGrow: 1 }),
+                Box(
+                  {
+                    width: "100%",
+                    height: 3,
+                    flexDirection: "row",
+                    backgroundColor: palette.input,
+                  },
+                  Box({ width: 1, height: "100%", backgroundColor: palette.blue }),
+                  Box(
+                    {
+                      flexGrow: 1,
+                      height: "100%",
+                      paddingX: 2,
+                      paddingY: 1,
+                      flexDirection: "column",
+                    },
+                    Text({
+                      content: `${inputPrefix}${displayValue}${state.value ? "" : " (press Enter)"}`,
+                      fg: inputColor,
+                      height: 1,
+                      truncate: true,
+                    })
+                  )
+                )
+              )
+            )
+          )
+        )
+      );
+      renderer.requestRender();
+    };
+    const onKey = (key) => {
+      if (settled) return;
+      if (key.name === "c" && key.ctrl) {
+        cleanup();
+        process.exit(130);
+      }
+      if (key.name === "return") {
+        finish();
+        return;
+      }
+      if (key.name === "escape") {
+        state.value = "";
+        finish();
+        return;
+      }
+      if (key.name === "backspace") {
+        state.value = state.value.slice(0, -1);
+      } else if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+        state.value += key.sequence;
+      }
+      render();
+    };
+
+    createCliRenderer({
+      exitOnCtrlC: false,
+      clearOnShutdown: true,
+      screenMode: "alternate-screen",
+      consoleMode: "disabled",
+      backgroundColor: palette.bg,
+      targetFps: 30,
+    }).then((created) => {
+      if (settled) {
+        created.destroy();
+        return;
+      }
+      renderer = created;
+      renderer.keyInput.on("keypress", onKey);
+      renderer.on("resize", render);
+      hideCursor();
+      render();
+    }).catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+}
+
+function inputDialogCopy(label, fallback) {
+  if (/Local machine IP|LAN IP|Roblox to reach/i.test(label)) {
+    return {
+      title: "Roblox Connection",
+      message: "What IP should Roblox connect to?",
+      detail: `Use the detected address unless Roblox is on another network interface. Default: ${fallback}`,
+    };
+  }
+  if (/Autoexec target/i.test(label)) {
+    return {
+      title: "Autoexec Target",
+      message: "Where should the loader be installed?",
+      detail: "Type target numbers separated by commas, or press Enter to install to all detected executors.",
+    };
+  }
+  if (/Harness numbers/i.test(label)) {
+    return {
+      title: "Harness Selection",
+      message: "Which harnesses should be configured?",
+      detail: "Type numbers separated by commas, type all, or press Enter to skip.",
+    };
+  }
+  return {
+    title: "Installer Input",
+    message: label,
+    detail: fallback ? `Press Enter to use the default: ${fallback}` : "Type a value, then press Enter.",
+  };
+}
+
+function yesNoDialogCopy(label, fallback) {
+  if (/Roblox on another machine/i.test(label)) {
+    return {
+      title: "Roblox Connection",
+      message: "Will Roblox run on a different computer?",
+      detail: "Choose No if Roblox and this installer are on the same Mac. Choose Yes only if Roblox needs to connect over your local network.",
+      noLabel: "No, same computer",
+      yesLabel: "Yes, another computer",
+    };
+  }
+  if (/Pull latest/i.test(label)) {
+    return {
+      title: "Update Before Install",
+      message: "Check for the newest installer code first?",
+      detail: "This runs git pull before building. Choose No if you want to use the files already on this machine.",
+      noLabel: "Skip",
+      yesLabel: "Update",
+    };
+  }
+  if (/Ollama|semantic/i.test(label)) {
+    return {
+      title: "Optional Search Setup",
+      message: "Set up local semantic search?",
+      detail: "This installs or configures Ollama with embeddinggemma. It is optional and can take extra disk space and time.",
+      noLabel: "Skip",
+      yesLabel: "Set up",
+    };
+  }
+  if (/autoexec/i.test(label)) {
+    return {
+      title: "Autoexec Loader",
+      message: "Install the Roblox loader into autoexec?",
+      detail: "This can make supported executors load the bridge automatically. Choose Skip if you prefer to paste the loader manually.",
+      noLabel: "Skip",
+      yesLabel: "Install",
+    };
+  }
+  return {
+    title: "Installer Question",
+    message: label,
+    detail: fallback ? "Press Enter to keep the recommended Yes choice." : "Press Enter to keep the recommended No choice.",
+    noLabel: "No",
+    yesLabel: "Yes",
+  };
 }
 
 function prompt(query) {
@@ -1098,6 +3037,20 @@ function expandHome(value) {
   if (value === "~") return os.homedir();
   if (value.startsWith("~/") || value.startsWith("~\\")) return path.join(os.homedir(), value.slice(2));
   return value;
+}
+
+function shrinkHome(value) {
+  const home = os.homedir();
+  return String(value).startsWith(home) ? `~${String(value).slice(home.length)}` : String(value);
+}
+
+function readPackageVersion() {
+  try {
+    const packageJson = JSON.parse(fsSync.readFileSync(path.join(CURRENT_REPO_DIR, "package.json"), "utf8"));
+    return typeof packageJson.version === "string" && packageJson.version ? packageJson.version : "1";
+  } catch {
+    return "1";
+  }
 }
 
 function vscodeGlobalStoragePath(...parts) {
